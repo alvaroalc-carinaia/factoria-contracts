@@ -3,7 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 P = Path(__file__).resolve().parents[1] / 'automation' / 'opencode' / 'jira_gate.py'
 spec = importlib.util.spec_from_file_location('jira_gate', P)
@@ -136,6 +136,9 @@ def no_vars_env(**extra):
 
 class ZeroConfigTests(unittest.TestCase):
     """Works like the previous pilot: no GitHub Variables, no issue_key, no story edits."""
+
+    def setUp(self):
+        self.enterContext(patch.object(mod, 'open_pull_requests', return_value=[]))
 
     def test_without_any_variable(self):
         with no_vars_env():
@@ -291,6 +294,219 @@ class ZeroConfigTests(unittest.TestCase):
         self.assertEqual(mod.main(['--issue','','--max-issues','4','--mode','inspect']), 2)
         self.assertEqual(mod.main(['--issue','','--max-issues','0','--mode','inspect']), 2)
         self.assertEqual(mod.main(['--issue','','--max-issues','nope','--mode','inspect']), 2)
+
+
+class DependencyWaitTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(no_vars_env())
+        self.data = {}
+        self.keys = []
+        self.enterContext(patch.object(mod, 'jira_client', return_value=self.data.__getitem__))
+        self.enterContext(patch.object(mod, 'jira_search_client', return_value=lambda *_: self.keys))
+        self.github = self.enterContext(patch.object(mod, 'github_existing'))
+        self.prs = self.enterContext(patch.object(mod, 'open_pull_requests', return_value=[]))
+        self.sleep = self.enterContext(patch.object(mod.time, 'sleep'))
+        self.now = self.enterContext(patch.object(mod.time, 'time', return_value=100))
+
+    def candidate(self, key, blockers=()):
+        links = [{'type': BLOCKS, 'inwardIssue': {'key': blocker}} for blocker in blockers]
+        self.keys.append(key)
+        self.data[key] = issue(key, links=links)
+
+    def test_three_admissions_across_waves_without_duplicate_or_fourth(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.candidate('KAN-2', ['KAN-9'])
+        self.candidate('KAN-3')
+        for key in ('KAN-8', 'KAN-9'):
+            self.data[key] = issue(key, status='En curso', labels=['agent-ready', 'engine-cursor'])
+        admitted = []
+        for expected, just_finished in [('KAN-3', None), ('KAN-1', 'KAN-8'), ('KAN-2', 'KAN-9')]:
+            if just_finished:
+                self.data[just_finished] = issue(just_finished, status='Finalizada')
+            chosen, _, more = mod.select_wave('build', 3, admitted, 1900)
+            self.assertEqual([item['issue'] for item in chosen], [expected])
+            admitted.append(expected)
+            self.assertEqual(more, len(admitted) < 3)
+        self.candidate('KAN-4')
+        self.assertEqual(mod.select_wave('build', 3, admitted, 1900), ([], [], False))
+        self.sleep.assert_not_called()
+
+    def test_all_blocked_then_one_unlocks(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.data['KAN-8'] = issue('KAN-8', status='In Progress')
+        self.sleep.side_effect = lambda _: self.data.update({'KAN-8': issue('KAN-8', status='Done')})
+        chosen, _, more = mod.select_wave('build', 1, [], 1900)
+        self.sleep.assert_called_once_with(600)
+        self.assertEqual([item['issue'] for item in chosen], ['KAN-1'])
+        self.assertFalse(more)
+
+    def test_mixed_blockers_never_trigger_sleep(self):
+        self.candidate('KAN-1', ['KAN-8', 'KAN-9'])
+        self.data['KAN-8'] = issue('KAN-8', status='AI Review')
+        for labels in ([], ['agent-ready'], ['engine-claude'], ['agent-ready', 'engine-cursor', 'engine-claude']):
+            with self.subTest(labels=labels):
+                self.data['KAN-9'] = issue('KAN-9', labels=labels)
+                chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+                self.assertEqual(chosen, [])
+                self.assertFalse(more)
+                self.assertIn('KAN-9', skipped[0]['reason'])
+        self.sleep.assert_not_called()
+
+    def test_human_work_does_not_hold_up_lower_ranked_ready_keys(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.candidate('KAN-2')
+        self.candidate('KAN-3')
+        self.candidate('KAN-4')
+        self.data['KAN-8'] = issue('KAN-8', status='In Progress', labels=[])
+        chosen, _, more = mod.select_wave('build', 3, [], 1900)
+        self.assertEqual([r['issue'] for r in chosen], ['KAN-2', 'KAN-3', 'KAN-4'])
+        self.assertFalse(more)
+        self.sleep.assert_not_called()
+
+    def test_human_review_without_parent_pr_does_not_wait_for_human_close(self):
+        self.candidate('KAN-1', ['KAN-8', 'KAN-9'])
+        self.data['KAN-8'] = issue('KAN-8', status='Human Review')
+        self.data['KAN-9'] = issue('KAN-9', status='Finalizada', labels=[])
+        chosen, _, more = mod.select_wave('build', 1, [], 1900)
+        self.sleep.assert_not_called()
+        self.assertFalse(more)
+        self.assertEqual(chosen, [])
+
+    def parent(self, key, engine, sha='a' * 40):
+        branch = f'{engine}/{key.lower()}-implementation'
+        return {'body': f'Factory Jira: {key}\nFactory Engine: {engine}',
+                'head': {'ref': branch, 'sha': sha, 'repo': {'full_name': 'owner/repo'}},
+                'html_url': 'https://github.com/owner/repo/pull/7'}
+
+    def test_published_parent_immediately_unlocks_child_across_engines(self):
+        self.candidate('KAN-1', ['KAN-8', 'KAN-9'])
+        self.data['KAN-9'] = issue('KAN-9', status='Finalizada', labels=[])
+        for engine in ('claude', 'cursor', 'opencode'):
+            for status in ('In Progress', 'AI Review', 'Human Review'):
+                with self.subTest(engine=engine, status=status):
+                    self.data['KAN-8'] = issue('KAN-8', status=status, labels=['agent-ready', 'engine-' + engine])
+                    pr = self.parent('KAN-8', engine)
+                    self.prs.return_value = [pr]
+                    chosen, _, more = mod.select_wave('build', 1, [], 1900)
+                    self.assertFalse(more)
+                    self.assertEqual(chosen[0]['base_branch'], pr['head']['ref'])
+                    self.assertEqual(chosen[0]['base_sha'], pr['head']['sha'])
+                    self.assertEqual(chosen[0]['parents'][0]['pr'], pr['html_url'])
+        self.sleep.assert_not_called()
+
+    def test_refresh_after_publication_without_waiting_for_jira_done(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.data['KAN-8'] = issue('KAN-8', status='En curso', labels=['agent-ready', 'engine-cursor'])
+        self.prs.side_effect = [[], [self.parent('KAN-8', 'cursor')]]
+        chosen, _, _ = mod.select_wave('build', 1, [], 100 + mod.WAIT_SECONDS)
+        self.sleep.assert_called_once_with(600)
+        self.assertEqual(chosen[0]['parents'][0]['issue'], 'KAN-8')
+        self.assertEqual(mod.WAIT_SECONDS, 340 * 60)
+
+    def test_independent_parents_require_a_single_head_containing_both(self):
+        self.candidate('KAN-1', ['KAN-8', 'KAN-9'])
+        for key in ('KAN-8', 'KAN-9'):
+            self.data[key] = issue(key, status='AI Review')
+        self.prs.return_value = [self.parent('KAN-8', 'opencode'), self.parent('KAN-9', 'opencode', 'b'*40)]
+        with patch.object(mod, 'github_api', return_value={'status': 'diverged'}):
+            chosen, skipped, _ = mod.select_wave('build', 1, [], 1900)
+            self.assertEqual(chosen, [])
+            self.assertIn('independent heads', skipped[0]['reason'])
+        with patch.object(mod, 'github_api', side_effect=[{'status': 'behind'}, {'status': 'ahead'}]):
+            chosen, _, _ = mod.select_wave('build', 1, [], 1900)
+            self.assertEqual(chosen[0]['base_sha'], 'b' * 40)
+
+    def test_legacy_pr_requires_exact_url_and_key_and_same_repository(self):
+        pr = self.parent('KAN-8', 'claude')
+        with patch.dict(os.environ, {'JIRA_URL': 'https://board.example'}):
+            pr['body'] = 'Implements https://board.example/browse/KAN-80'
+            self.assertIsNone(mod.parent_pr([pr], 'owner/repo', 'KAN-8', 'claude'))
+            pr['body'] = 'Implements https://board.example/browse/KAN-8'
+            self.assertEqual(mod.parent_pr([pr], 'owner/repo', 'KAN-8', 'claude')['sha'], 'a' * 40)
+            pr['head']['repo']['full_name'] = 'fork/repo'
+            self.assertIsNone(mod.parent_pr([pr], 'owner/repo', 'KAN-8', 'claude'))
+
+    def test_cli_carries_shared_budget_and_deadline_between_jobs(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.candidate('KAN-2')
+        self.data['KAN-8'] = issue('KAN-8', status='En curso')
+        outputs = self.enterContext(patch.object(mod, 'write_outputs'))
+        args = ['--mode', 'build', '--max-issues', '2', '--wait']
+        self.assertEqual(mod.main(args), 0)
+        first = outputs.call_args.args[0]
+        self.assertEqual(first['can_wait'], 'true')
+        self.assertEqual(first['issues'], '["KAN-2"]')
+        self.data['KAN-8'] = issue('KAN-8', status='Done')
+        self.candidate('KAN-3')
+        self.assertEqual(mod.main(args + ['--admitted', first['admitted'],
+                                          '--deadline', str(first['deadline'])]), 0)
+        second = outputs.call_args.args[0]
+        self.assertEqual(second['issues'], '["KAN-1"]')
+        self.assertEqual(second['admitted'], '["KAN-2", "KAN-1"]')
+        self.assertEqual(second['can_wait'], 'false')
+        self.assertEqual(second['deadline'], first['deadline'])
+
+    def test_wait_stops_on_changed_routing(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.data['KAN-8'] = issue('KAN-8', status='En curso')
+        self.sleep.side_effect = lambda _: self.data.update({'KAN-8': issue('KAN-8', labels=[])})
+        chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+        self.assertFalse(more)
+        self.assertFalse(skipped[0]['waitable'])
+        self.assertEqual(chosen, [])
+        self.sleep.assert_called_once()
+
+    def test_deadline_bounds_sleep_and_rechecks_all_gates(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.data['KAN-8'] = issue('KAN-8', status='In Progress')
+        self.now.side_effect = [100, 112]
+        chosen, skipped, more = mod.select_wave('build', 2, [], 112)
+        self.sleep.assert_called_once_with(12)
+        self.assertTrue(skipped[0]['waitable'])
+        self.assertEqual(chosen, [])
+        self.assertFalse(more)
+
+    def test_existing_branch_is_not_a_reason_to_wait(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.data['KAN-8'] = issue('KAN-8', status='En curso')
+        self.github.side_effect = mod.GateError('existing branch')
+        chosen, _, more = mod.select_wave('build', 2, [], 1900)
+        self.assertEqual(chosen, [])
+        self.assertFalse(more)
+        self.sleep.assert_not_called()
+
+    def test_inspect_never_waits(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        self.data['KAN-8'] = issue('KAN-8')
+        self.assertEqual(mod.main(['--mode', 'inspect', '--wait']), 0)
+        self.sleep.assert_not_called()
+
+    def test_plain_dependencies_field_participates_in_wait(self):
+        self.assertEqual(mod.extract_text_blockers('Dependencies: KAN-8, KAN-9'), {'KAN-8', 'KAN-9'})
+
+    def test_custom_dependency_field_includes_human_blocker(self):
+        self.enterContext(patch.dict(os.environ, {'JIRA_DEPENDENCIES_FIELD_ID': 'customfield_100'}))
+        self.candidate('KAN-1')
+        self.data['KAN-1']['fields']['customfield_100'] = [{'key': 'KAN-8'}, 'KAN-9']
+        self.data['KAN-8'] = issue('KAN-8', status='In Progress')
+        self.data['KAN-9'] = issue('KAN-9', labels=[])
+        chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+        self.assertEqual(chosen, [])
+        self.assertFalse(more)
+        self.assertIn('KAN-9', skipped[0]['reason'])
+        self.sleep.assert_not_called()
+
+
+class SearchPaginationTests(unittest.TestCase):
+    def test_ranked_search_continues_past_first_page(self):
+        from io import BytesIO
+        replies = [BytesIO(b'{"issues":[{"key":"KAN-1"}],"nextPageToken":"next"}'),
+                   BytesIO(b'{"issues":[{"key":"KAN-2"}],"isLast":true}')]
+        get = Mock(side_effect=replies)
+        with no_vars_env(JIRA_URL='https://example.test', JIRA_USERNAME='user', JIRA_API_TOKEN='test'), \
+                patch.object(mod.urllib.request, 'urlopen', get):
+            self.assertEqual(list(mod.jira_search_client()('ORDER BY Rank ASC', 1)), ['KAN-1', 'KAN-2'])
+        self.assertIn('nextPageToken=next', get.call_args.args[0].full_url)
 
 
 class WorkflowZeroConfigTests(unittest.TestCase):

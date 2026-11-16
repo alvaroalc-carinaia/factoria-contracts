@@ -24,6 +24,8 @@ def gh(*args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--issue", required=True)
+    p.add_argument("--base-branch", default="master")
+    p.add_argument("--parent-sha", default="")
     args = p.parse_args()
     key = args.issue.upper()
     branch = "agent/" + key.lower()
@@ -32,6 +34,8 @@ def main():
     if len(prs) != 1:
         raise RuntimeError("Exactly ONE actual open PR for feature branch is required")
     pr = prs[0]
+    if pr["baseRefName"] != args.base_branch:
+        raise RuntimeError(f"Expected PR target {args.base_branch}, found {pr['baseRefName']}")
     if not pr["isDraft"]:
         raise RuntimeError("PR is not Draft")
     body = pr.get("body") or ""
@@ -40,6 +44,13 @@ def main():
     sha = pr.get("headRefOid") or ""
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise RuntimeError("Could not obtain published PR HEAD commit")
+    if args.parent_sha:
+        if not re.fullmatch(r"[0-9a-f]{40}", args.parent_sha):
+            raise RuntimeError("Invalid pinned parent commit")
+        repo = os.environ["GITHUB_REPOSITORY"]
+        comparison = gh("api", f"repos/{repo}/compare/{args.parent_sha}...{sha}?per_page=1")
+        if comparison.get("status") != "ahead":
+            raise RuntimeError("Published child HEAD does not extend the pinned parent commit")
     detail = gh("pr", "view", str(pr["number"]), "--json", "comments")
     comments = [x.get("body") or "" for x in detail.get("comments", [])]
     review_claim = any(

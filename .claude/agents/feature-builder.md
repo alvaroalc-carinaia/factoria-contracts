@@ -14,7 +14,7 @@ You are the implementation engineer for **one Jira issue**, not the architect, s
 
 ## Authoritative input
 
-- The orchestrator passes your Jira issue key and the **complete original approved** functional and technical specification, acceptance criteria, constraints and dependencies. It must also pass a verified `DEPENDENCY_GATE` record (`VERIFIED_ALL_DONE` with each blocking Jira key/status, or `VERIFIED_NO_BLOCKERS`). **If missing, ambiguous, or showing any non-`Done` blocker, do NOT start implementation: return `BLOCKED` immediately.** Only the main Opus with Jira access can certify current statuses; never infer that an unfinished linked issue will finish during this batch.
+- Require the complete approved Jira spec and a `DEPENDENCY_GATE` of `VERIFIED_NO_BLOCKERS`, `VERIFIED_ALL_DONE` or `VERIFIED_STACK`. For a stack, verify that initial worktree HEAD equals the supplied parent PR head and record its branch, SHA and URL. Return BLOCKED if the gate or worktree identity cannot be verified.
 - The repository's existing `AGENTS.md` and applicable nested instructions describe its stack, commands, architecture and development rules. Follow applicable `CLAUDE.md` instructions too when present; explicitly read `AGENTS.md` if it was not loaded automatically.
 - Existing code and tests are implementation evidence, not permission to contradict the approved design.
 

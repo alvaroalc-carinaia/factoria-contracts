@@ -8,9 +8,11 @@ Do not activate the daily schedule until the first small controlled test has pas
 | Routing conflicted | Ready with engine-cursor AND engine-claude | SKIP |
 | Other provider | Ready with engine-opencode | SKIP |
 | Repo mismatch | Ready engine-cursor, different Repository | SKIP |
-| Blocker open | A is Ready, depends on B in Human Review | SKIP A, leave Ready |
+| Open parent PR | Cursor issue depends on a Claude or OpenCode task in Human Review | Verify parent PR identity and head. Create a Cursor worktree at its SHA and target the parent branch. An unfinished human task keeps the child Ready. |
 | Blocker exact Done | A depends on B with current status.name Done | A eligible if remaining gates pass |
-| Two blockers | B Done, C In Progress | SKIP A |
+| Two blockers | B Done, C In Progress with an agent route | A starts at C's verified PR head once published. If C is human-owned, skip A. |
+| Later admission | Two eligible issues, a third awaiting an agent PR | Start two immediately, then admit the third from the published parent SHA. A fourth distinct key stays in Ready. |
+| Mixed ownership | One unfinished agent blocker and one unfinished human task | Continue down the backlog. This candidate does not keep the run waiting. |
 | Link direction | Candidate A blocks B, but has no blockers itself | Does NOT treat B as prerequisite |
 | Missing blocker data | Jira lacks access to blocker key or link direction | SKIP (fail closed) |
 | Only one valid issue | One fully eligible issue | One isolated builder, published Draft PR, independent review |

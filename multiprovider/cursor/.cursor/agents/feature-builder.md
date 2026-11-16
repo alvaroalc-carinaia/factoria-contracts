@@ -20,7 +20,7 @@ You implement exactly ONE human-approved Jira issue. You are NOT the solution ar
 - Keep temporary files, SQLite databases, caches and virtualenvs inside your worktree (e.g. `<worktree>/.tmp`, `TMPDIR=<worktree>/.tmp`); never use shared fixed paths or bind fixed network ports for local services. If a test fails only because of a collision with a parallel run (port in use, locked shared file), report it as such instead of changing the code.
 
 ## Before editing
-1. Verify the repository identity, actual working directory, isolated environment, current branch and frozen base. Your branch must start from the parent's frozen `origin/master` base commit, taken right after a fresh `git fetch`; never from a stale local branch or another feature branch. NEVER implement in the parent checkout or another issue's working tree.
+1. Verify the repo, assigned worktree and branch. Initial HEAD must equal the recorded `BASE_COMMIT` from fresh `origin/master` or a verified parent PR. Keep all writes in this child's worktree.
 2. Parent is responsible for Jira selection and dependency gate. Do not expand the task, change priorities, or select new Jira issues.
 3. If isolation is unavailable, task identity is ambiguous, or architecture is underspecified, return BLOCKED WITHOUT altering code.
 
