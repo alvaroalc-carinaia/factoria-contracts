@@ -442,7 +442,8 @@ def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wai
     pending = []
     human_review = (os.getenv("JIRA_HUMAN_REVIEW_STATUS") or DEFAULT_HUMAN_REVIEW_STATUS).strip().casefold()
     for dependency, dep_fields, status, engine in unfinished:
-        if check_github and not status_is(status, "ready"):
+        ready = status_is(status, "ready")
+        if check_github and not ready:
             parent = parent_pr(get_prs(repo), repo, dependency, engine)
             if parent:
                 parents.append(parent)
@@ -450,13 +451,13 @@ def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wai
         reason = f"Blocker {dependency} is {status!r}, not exact Done/Finalizada; no verified parent PR"
         if not evaluate_wait or status.casefold() == human_review:
             raise GateError(reason)
-        # A blocker awaiting its own unpublished prerequisite cannot start now.
-        # Trace that chain to report the actual obstruction or cycle.
-        dependency_plan(dep_fields, repo, get_issue, get_prs, check_github,
-                        evaluate_wait, path + (dependency,))
+        if ready:
+            # Only a blocker that has yet to start needs its readiness checked.
+            dependency_plan(dep_fields, repo, get_issue, get_prs, check_github,
+                            evaluate_wait, path + (dependency,))
         if len(path) > 1:
             raise GateError(f"{path[-1]} cannot start: {reason}")
-        if status_is(status, "ready"):
+        if ready:
             verify_ready_blocker(dependency, dep_fields, engine, repo, get_prs, check_github)
         pending.append(reason)
     base = stack_base(repo, parents) if parents else {"branch": "master", "sha": ""}

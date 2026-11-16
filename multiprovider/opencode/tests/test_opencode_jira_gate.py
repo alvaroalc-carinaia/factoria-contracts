@@ -530,6 +530,20 @@ class DependencyWaitTests(unittest.TestCase):
         self.assertIn('KAN-4', skipped[0]['reason'])
         self.sleep.assert_not_called()
 
+    def test_active_parent_with_open_human_prerequisite_can_publish(self):
+        self.candidate('KAN-11', ['KAN-12'])
+        self.candidate('KAN-12', ['KAN-13'])
+        self.data['KAN-13'] = issue('KAN-13', status='Listo', labels=[])
+        for status in ('In Progress', 'En curso', 'AI Review'):
+            with self.subTest(status=status):
+                self.data['KAN-12']['fields']['status']['name'] = status
+                self.prs.side_effect = [[], [self.parent('KAN-12', 'opencode')]]
+                self.sleep.reset_mock()
+                chosen, _, _ = mod.select_wave('build', 1, [], 1900)
+                self.sleep.assert_called_once_with(mod.POLL_SECONDS)
+                self.assertEqual([r['issue'] for r in chosen], ['KAN-11'])
+                self.assertEqual(chosen[0]['parents'][0]['issue'], 'KAN-12')
+
     def test_ready_blocker_must_be_runnable_now(self):
         self.sleep.side_effect = AssertionError("unexpected poll")
         self.candidate('KAN-1', ['KAN-2'])
