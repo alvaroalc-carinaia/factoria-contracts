@@ -42,6 +42,11 @@ TEXT_BLOCKER = re.compile(
 BLOCKER_WORDS = ("is blocked by", "blocked by", "depends on", "requires", "depende de", "bloqueado por", "bloqueada por")
 OUTWARD_DEPENDS = ("depends on", "requires", "depende de")
 DEPENDENCY_HEADERS = ("dependencies", "dependencias", "prerequisites", "prerrequisitos", "blocking issues")
+NO_DEPENDENCIES = {"", "none", "ninguna", "ninguno", "n/a", "-", "—"}
+
+
+def empty_dependency_value(value):
+    return value.strip().rstrip(".,;:!?").strip().casefold() in NO_DEPENDENCIES
 
 # Same rule as the Claude contract (multiprovider/claude/
 # 01-jira-three-parallel-STRICT-ROUTING.md, "Localized status names") and the
@@ -138,9 +143,11 @@ def extract_text_blockers(text):
         header, sep, value = stripped.partition(":")
         if sep and header.strip() in DEPENDENCY_HEADERS:
             in_section = not value.strip()
-            if value.strip() and value.strip() not in ("none", "ninguna", "ninguno"):
+            if not empty_dependency_value(value):
                 keys = re.findall(r"\b[A-Z][A-Z0-9_]*-\d+\b", line.partition(":")[2])
-                if not keys:
+                # Prerequisites can also describe the software environment.
+                if not keys and (header.strip() not in ("prerequisites", "prerrequisitos")
+                                 or any(word in value for word in BLOCKER_WORDS + ("pending", "pendiente", "blocked", "bloquead"))):
                     raise GateError("Ambiguous textual dependency without Jira key")
                 blockers.update(keys)
             continue
@@ -200,7 +207,7 @@ def dependency_field_keys(value):
     text = flatten_adf(value).strip()
     if not text and not isinstance(value, str):
         raise GateError("Unreadable dependency field")
-    if text.casefold() in ("", "none", "ninguna", "ninguno"):
+    if empty_dependency_value(text):
         return set()
     keys = set(re.findall(r"\b[A-Z][A-Z0-9_]*-\d+\b", text))
     if not keys:
@@ -397,6 +404,65 @@ def repository_source(fields, description, repo):
     return "story" if declared else "default GITHUB_REPOSITORY"
 
 
+def verify_ready_blocker(key, fields, engine, repo, get_prs, check_github):
+    if key.split("-")[0] != project_key(key):
+        raise GateError(f"Ready blocker {key} outside configured project")
+    if len(flatten_adf(fields.get("description")).strip()) < 60:
+        raise GateError(f"Ready blocker {key} lacks an approved technical spec")
+    if check_github:
+        if parent_pr(get_prs(repo), repo, key, engine):
+            raise GateError(f"Ready blocker {key} already has an open PR")
+        if engine == "opencode":
+            github_existing(key, "agent/" + key.lower())
+
+
+def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wait, path):
+    blockers = blocking_links(fields.get("issuelinks")) | extract_text_blockers(flatten_adf(fields.get("description")))
+    deps_field = os.environ.get("JIRA_DEPENDENCIES_FIELD_ID", "").strip()
+    if deps_field:
+        if deps_field not in fields:
+            raise GateError("Configured Jira dependency field missing")
+        blockers.update(dependency_field_keys(fields[deps_field]))
+    for dependency in sorted(blockers.intersection(path)):
+        cycle = path[path.index(dependency):] + (dependency,)
+        raise GateError("Dependency cycle: " + " -> ".join(cycle))
+    unfinished = []
+    for dependency in sorted(blockers):
+        dep_fields = get_issue(dependency).get("fields") or {}
+        status = str((dep_fields.get("status") or {}).get("name") or "").strip()
+        if status_is(status, "done"):
+            continue
+        if not is_waitable_agent_blocker(dep_fields, status):
+            raise GateError(f"Blocker {dependency} is {status!r}, not exact Done/Finalizada or an active agent task")
+        repository_source(dep_fields, flatten_adf(dep_fields.get("description")), repo)
+        engine = next(label for label in dep_fields["labels"] if label in ENGINES)
+        unfinished.append((dependency, dep_fields, status, engine.removeprefix("engine-")))
+
+    parents = []
+    pending = []
+    human_review = (os.getenv("JIRA_HUMAN_REVIEW_STATUS") or DEFAULT_HUMAN_REVIEW_STATUS).strip().casefold()
+    for dependency, dep_fields, status, engine in unfinished:
+        if check_github and not status_is(status, "ready"):
+            parent = parent_pr(get_prs(repo), repo, dependency, engine)
+            if parent:
+                parents.append(parent)
+                continue
+        reason = f"Blocker {dependency} is {status!r}, not exact Done/Finalizada; no verified parent PR"
+        if not evaluate_wait or status.casefold() == human_review:
+            raise GateError(reason)
+        # A blocker awaiting its own unpublished prerequisite cannot start now.
+        # Trace that chain to report the actual obstruction or cycle.
+        dependency_plan(dep_fields, repo, get_issue, get_prs, check_github,
+                        evaluate_wait, path + (dependency,))
+        if len(path) > 1:
+            raise GateError(f"{path[-1]} cannot start: {reason}")
+        if status_is(status, "ready"):
+            verify_ready_blocker(dependency, dep_fields, engine, repo, get_prs, check_github)
+        pending.append(reason)
+    base = stack_base(repo, parents) if parents else {"branch": "master", "sha": ""}
+    return blockers, parents, base, pending
+
+
 def validate(key, mode, get_issue, check_github=True, evaluate_wait=False, get_prs=None):
     if not KEY.fullmatch(key):
         raise GateError("Invalid issue key")
@@ -424,46 +490,14 @@ def validate(key, mode, get_issue, check_github=True, evaluate_wait=False, get_p
     repo_source = repository_source(fields, description, repo)
     if not description.strip() or len(description) < 60:
         raise GateError("Jira issue description too short to provide approved technical spec")
-    blockers = blocking_links(fields.get("issuelinks")) | extract_text_blockers(description)
-    deps_field = os.environ.get("JIRA_DEPENDENCIES_FIELD_ID", "").strip()
-    if deps_field:
-        if deps_field not in fields:
-            raise GateError("Configured Jira dependency field missing")
-        blockers.update(dependency_field_keys(fields[deps_field]))
-    if key in blockers:
-        raise GateError("Issue depends on itself")
-    unfinished = []
-    for dependency in sorted(blockers):
-        dep_fields = get_issue(dependency).get("fields") or {}
-        status = str((dep_fields.get("status") or {}).get("name") or "").strip()
-        if status_is(status, "done"):
-            continue
-        if not is_waitable_agent_blocker(dep_fields, status):
-            raise GateError(f"Blocker {dependency} is {status!r}, not exact Done/Finalizada or an active agent task")
-        repository_source(dep_fields, flatten_adf(dep_fields.get("description")), repo)
-        engine = next(label for label in dep_fields["labels"] if label in ENGINES)
-        unfinished.append((dependency, status, engine.removeprefix("engine-")))
-
-    parents = []
-    pending = []
     get_prs = get_prs or cache(open_pull_requests)
-    human_review = (os.getenv("JIRA_HUMAN_REVIEW_STATUS") or DEFAULT_HUMAN_REVIEW_STATUS).strip().casefold()
-    for dependency, status, engine in unfinished:
-        if check_github and not status_is(status, "ready"):
-            parent = parent_pr(get_prs(repo), repo, dependency, engine)
-            if parent:
-                parents.append(parent)
-                continue
-        reason = f"Blocker {dependency} is {status!r}, not exact Done/Finalizada; no verified parent PR"
-        if not evaluate_wait or status.casefold() == human_review:
-            raise GateError(reason)
-        pending.append(reason)
+    blockers, parents, base, pending = dependency_plan(
+        fields, repo, get_issue, get_prs, check_github, evaluate_wait, (key,))
     branch = "agent/" + key.lower()
     if check_github:
         github_existing(key, branch)
     if pending:
         raise AgentDependenciesPending("; ".join(pending))
-    base = stack_base(repo, parents) if parents else {"branch": "master", "sha": ""}
     return {"issue": key, "repo": repo, "repo_source": repo_source, "status": actual_status, "blockers": sorted(blockers),
             "base_branch": base["branch"], "base_sha": base["sha"], "parents": parents,
             "branch": branch, "summary": str(fields.get("summary") or "")[:120]}
@@ -509,6 +543,7 @@ def select(mode, get_issue, search, check_github=True, limit=50, max_issues=3, a
     chosen = []
     seen = set(admitted)
     get_prs = cache(open_pull_requests)
+    get_issue = cache(get_issue)  # Share Jira snapshots only within this ranked scan.
     for key in search(candidate_jql(project), limit):
         if not isinstance(key, str) or not KEY.fullmatch(key) or key in seen:
             continue

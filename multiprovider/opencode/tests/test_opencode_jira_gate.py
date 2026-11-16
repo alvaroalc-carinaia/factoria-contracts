@@ -484,6 +484,71 @@ class DependencyWaitTests(unittest.TestCase):
     def test_plain_dependencies_field_participates_in_wait(self):
         self.assertEqual(mod.extract_text_blockers('Dependencies: KAN-8, KAN-9'), {'KAN-8', 'KAN-9'})
 
+    def test_existing_stories_with_empty_or_technical_prerequisites_are_admitted(self):
+        self.candidate('KAN-1')
+        fields = self.data['KAN-1']['fields']
+        for line in ('Dependencias: ninguna.', 'Dependencies: N/A', 'Dependencies: -',
+                     'Dependencias: —', 'Prerequisites: Python 3.12'):
+            with self.subTest(line=line):
+                fields['description'] = PLAIN + '\n' + line
+                chosen, _, _ = mod.select_wave('build', 3, [], 1900)
+                self.assertEqual([r['issue'] for r in chosen], ['KAN-1'])
+        for value in ('ninguna.', 'N/A', '-', '—'):
+            self.assertEqual(mod.dependency_field_keys(value), set())
+        with self.assertRaisesRegex(mod.GateError, 'Ambiguous'):
+            mod.extract_text_blockers('Prerequisites: blocked by an unspecified Jira issue')
+        self.assertEqual(mod.extract_text_blockers('Prerequisites: Python 3.12 and KAN-8.'), {'KAN-8'})
+
+    def test_ready_dependency_cycle_is_reported_without_polling(self):
+        self.sleep.side_effect = AssertionError("unexpected poll")
+        for count in (1, 2, 4):
+            with self.subTest(count=count):
+                self.keys.clear()
+                keys = [f'KAN-{i + 1}' for i in range(count)]
+                for i, key in enumerate(keys):
+                    self.candidate(key, [keys[(i + 1) % count]])
+                chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+                self.assertEqual(chosen, [])
+                self.assertFalse(more)
+                self.assertEqual(len(skipped), count)
+                for entry in skipped:
+                    self.assertIn('Dependency cycle:', entry['reason'])
+                    self.assertFalse(entry['waitable'])
+        self.sleep.assert_not_called()
+
+    def test_transitive_human_blocker_skips_chain_and_admits_other_work(self):
+        self.sleep.side_effect = AssertionError("unexpected poll")
+        self.candidate('KAN-1', ['KAN-2'])
+        self.candidate('KAN-2', ['KAN-3'])
+        self.candidate('KAN-3', ['KAN-4'])
+        self.data['KAN-2']['fields']['labels'] = ['agent-ready', 'engine-cursor']
+        self.data['KAN-4'] = issue('KAN-4', status='In Progress', labels=[])
+        self.candidate('KAN-5')
+        chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+        self.assertEqual([r['issue'] for r in chosen], ['KAN-5'])
+        self.assertFalse(more)
+        self.assertIn('KAN-4', skipped[0]['reason'])
+        self.sleep.assert_not_called()
+
+    def test_ready_blocker_must_be_runnable_now(self):
+        self.sleep.side_effect = AssertionError("unexpected poll")
+        self.candidate('KAN-1', ['KAN-2'])
+        self.candidate('KAN-2', ['KAN-3'])
+        self.data['KAN-2']['fields']['labels'] = ['agent-ready', 'engine-claude']
+        self.data['KAN-3'] = issue('KAN-3', status='En curso')
+        chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+        self.assertEqual(chosen, [])
+        self.assertFalse(more)
+        self.assertIn('KAN-2 cannot start', skipped[0]['reason'])
+        self.sleep.assert_not_called()
+        # The same Ready blocker can start on a published agent PR.
+        self.prs.return_value = [self.parent('KAN-3', 'opencode')]
+        self.candidate('KAN-5')
+        chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+        self.assertEqual([r['issue'] for r in chosen], ['KAN-5'])
+        self.assertTrue(more)
+        self.assertTrue(skipped[0]['waitable'])
+
     def test_custom_dependency_field_includes_human_blocker(self):
         self.enterContext(patch.dict(os.environ, {'JIRA_DEPENDENCIES_FIELD_ID': 'customfield_100'}))
         self.candidate('KAN-1')

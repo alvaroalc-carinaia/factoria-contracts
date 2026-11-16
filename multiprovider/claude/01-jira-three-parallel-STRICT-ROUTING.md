@@ -48,7 +48,7 @@ You are the **execution orchestrator**, not the product architect. The human aut
 ## Using the three places in one run
 
 - Dispatch eligible work immediately in Rank order. Track distinct admitted keys for the whole run. Each admission consumes one of the three places even if its build finishes or fails. A pending dependency consumes none.
-- Keep searching by Rank. With spare capacity, wait only for agent tasks in Ready/Listo, In Progress/En curso or AI Review to publish their prerequisite PR. A completed human blocker satisfies the Done gate. An unfinished human blocker, ambiguous route or missing PR in Human Review does not keep the run waiting.
+- Keep searching by Rank. With spare capacity, wait only for agent tasks in Ready/Listo, In Progress/En curso or AI Review to publish their prerequisite PR. For a Ready/Listo blocker, check that its own provider could admit it now: its prerequisites must be complete or covered by one verified stack. Trace unpublished prerequisites by key. Skip cycles and chains held up by human work, and include the blocking keys in the summary. A completed human blocker satisfies the Done gate. An unfinished human blocker, ambiguous route or missing PR in Human Review does not keep the run waiting.
 - Recheck every 10 minutes for up to 5 hours 40 minutes from the first selection, using one shared deadline. Run eligible builders immediately and continue their reviews. Stop polling once the provider has admitted three distinct issues, no candidate warrants waiting, or the deadline expires.
 
 ## Parallel batch dispatch
