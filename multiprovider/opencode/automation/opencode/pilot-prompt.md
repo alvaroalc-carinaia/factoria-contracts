@@ -4,16 +4,15 @@ Process EXACTLY Jira key __ISSUE_KEY__ in repository __GITHUB_REPOSITORY__
 This invocation is exactly one issue. The workflow may start up to 3 such
 invocations in parallel; do not pick or refill another issue.
 
-Use your project .opencode/agents/factory-orchestrator.md contract. The runner
+Use the loaded factory-orchestrator agent contract. Read the issue worktree's
+root and applicable nested AGENTS.md for project conventions. The runner
 has independently validated the issue and created the feature branch.
 Independently recheck Jira approved spec, agent-ready, engine-opencode, repo,
-Ready status, links and live status of every blocker. Any blocker other than
-Done/Finalizada means SKIP WITHOUT CLAIMING IT. A story that declares no
+Ready status, links and live statuses. A human prerequisite requires Done/Finalizada. For an unfinished agent prerequisite, verify the parent PR(s), branch and head in the runner's pinned plan.
+A story that declares no
 Repository/Repositorio targets __GITHUB_REPOSITORY__; one naming another repo is ineligible.
 **Localized status names:** Jira may return translated `status.name` values depending on the account language. Treat `Ready` and `Listo` as the same status, and `Done` and `Finalizada` as the same status, in every check of this contract (candidate selection, dependency gate and re-checks). Any other name is not `Ready`/`Done`.
-The feature branch must come from a FRESH fetch of
-origin/master (git fetch origin master; branch from origin/master), never from
-a stale local master or another branch; verify the runner's base SHA.
+Start from the runner's pinned base commit (fresh origin/master or a verified parent PR head). Confirm the current HEAD and recheck each parent before claim.
 
 Delegate source/test editing to feature-builder (DeepSeek V4.1 Flash) ONE TIME
 for the initial implementation.
@@ -23,7 +22,7 @@ Corrections, if any, resume that same session; they are not a second builder.
 The external guard will stop the run if there is no source/test edit within
 its initial deadline, or at the absolute timeout. Do not work around it.
 
-Publish ONE Draft PR, then obtain an independent published-diff pr-reviewer
+Publish ONE Draft PR against the recorded base branch, listing parent keys, PR URLs and pinned heads in review order, then obtain an independent published-diff pr-reviewer
 (Kimi K3.1 Pro) verdict. Review budget, authoritative in
 automation/opencode/review_budget.py: MAX_CORRECTIONS=3, MAX_RE_REVIEWS=3,
 MAX_TOTAL_REVIEWS=4. The initial review is review 1 and is not a correction

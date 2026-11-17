@@ -131,9 +131,14 @@ def main():
     if now_branch != branch:
         raise SystemExit("CONFIG_BLOCKED: wrong git branch before model launch")
 
-    prompt_file = Path("automation/opencode/pilot-prompt.md")
+    prompt_file = Path(__file__).with_name("pilot-prompt.md")
     prompt = prompt_file.read_text(encoding="utf-8").replace("__ISSUE_KEY__", issue)
     prompt = prompt.replace("__GITHUB_REPOSITORY__", os.environ["GITHUB_REPOSITORY"])
+    prompt += "\nVerified branch plan (pinned at dispatch): " + json.dumps({
+        "base_branch": os.getenv("PR_BASE", "master"),
+        "base_commit": args.base,
+        "parent_prs": json.loads(os.getenv("STACK_PARENTS", "[]")),
+    })
     metrics = {"issue": issue, "agent": "factory-orchestrator", "builder_model": "opencode-go/deepseek-v4.1-flash",
                "reviewer_model": "opencode-go/kimi-k3.1-pro", "initial_change_seen": False,
                "changed_paths": [], "stop_reason": "", "exit_code": None, "seconds": 0,

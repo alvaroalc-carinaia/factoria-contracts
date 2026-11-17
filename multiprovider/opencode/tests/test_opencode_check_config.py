@@ -1,6 +1,8 @@
 """Static checks (no OpenCode CLI, no quota): agent files match check_config expectations."""
 import importlib.util
 import json
+import shutil
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -12,6 +14,22 @@ spec.loader.exec_module(mod)
 
 
 class CheckConfigTests(unittest.TestCase):
+    def test_copied_product_preflight_verifies_installed_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            product = Path(tmp)
+            for name in ('automation/opencode/check_config.py', 'automation/opencode/review_budget.py',
+                         '.opencode/agents/factory-orchestrator.md', 'automation/opencode/pilot-prompt.md',
+                         '.github/workflows/opencode-factory.yml'):
+                (product/name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT/name, product/name)
+            spec = importlib.util.spec_from_file_location('installed_preflight', product/'automation/opencode/check_config.py')
+            installed = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(installed)
+            installed._verificar_cupo_de_review()
+            (product/'automation/opencode/pilot-prompt.md').write_text('stale prompt', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'MAX_CORRECTIONS'):
+                installed._verificar_cupo_de_review()
+
     def test_expected_models(self):
         self.assertEqual(mod.AGENTS['factory-orchestrator'], ('primary', 'opencode-go/kimi-k3.1-pro', 40))
         self.assertEqual(mod.AGENTS['feature-builder'], ('subagent', 'opencode-go/deepseek-v4.1-flash', None))

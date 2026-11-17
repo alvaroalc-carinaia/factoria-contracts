@@ -195,7 +195,7 @@ def texto_respeta_cupo(texto, prohibidas=()):
     return errores
 
 
-def verificar_textos(root):
+def verificar_textos(root, *, instalado=False):
     """Comprueba que contrato, prompt, workflow y docs publican el mismo cupo.
 
     Args:
@@ -208,12 +208,31 @@ def verificar_textos(root):
     """
     raiz = Path(root)
     errores = []
+    def ruta(relativo):
+        if not instalado:
+            return raiz / relativo
+        destino = relativo.removeprefix("multiprovider/").removeprefix("opencode/")
+        if destino in ("MIGRACION.md", "PRUEBAS-Y-ARRANQUE-LIMPIO.md"):
+            destino = "automation/opencode/docs/" + destino
+        return raiz / destino
+
+    # A product install contains the live workflow and prompts. Check the
+    # portable docs and retired pilot too if installed. In the template all
+    # published copies are required.
+    opcionales = {"MIGRACION.md", "PRUEBAS-Y-ARRANQUE-LIMPIO.md",
+                  "PORTABLE-CONTRACT.md", "opencode-factory-PILOT.yml"}
     for relativo in ARCHIVOS_CON_CUPO:
-        texto = (raiz / relativo).read_text(encoding="utf-8")
+        archivo = ruta(relativo)
+        if instalado and archivo.name in opcionales and not archivo.exists():
+            continue
+        texto = archivo.read_text(encoding="utf-8")
         for mensaje in texto_respeta_cupo(texto, PROHIBIDAS.get(relativo, ())):
             errores.append(f"{relativo}: {mensaje}")
     for relativo, frase in CONSERVADAS:
-        texto = (raiz / relativo).read_text(encoding="utf-8")
+        archivo = ruta(relativo)
+        if instalado and archivo.name in opcionales and not archivo.exists():
+            continue
+        texto = archivo.read_text(encoding="utf-8")
         if frase not in texto:
             errores.append(f"{relativo}: falta el tope conservado {frase!r}")
     if errores:

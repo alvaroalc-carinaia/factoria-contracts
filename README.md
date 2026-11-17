@@ -24,9 +24,9 @@ Próximas iniciativas (propuestas): [ROADMAP.md](ROADMAP.md).
 ## Cómo funciona
 
 ```text
-Jira (Listo + agent-ready + engine-<provider>, blockers en Finalizada)
+Jira (Listo + agent-ready + engine-<provider>, blockers finalizados o cubiertos por una PR padre)
   └─► orquestador: selecciona por Rank ASC, comprueba dependencias y pasa la story a In Progress
-        └─► builder(s): implementan en una rama nueva desde origin/master (fetch fresco)
+        └─► builder(s): implementan en una rama propia desde la base verificada
               └─► Draft PR publicado
                     └─► reviewer independiente (contexto nuevo, solo lectura) sobre el diff publicado
                           ├─ CHANGES_REQUESTED → el mismo builder corrige en la misma rama y PR
@@ -56,19 +56,19 @@ Cada story se asigna a **un solo** provider con una etiqueta de Jira: `engine-cl
 | Límites | Cuota de la suscripción de Claude | Uso medido de Cloud Agents (requiere un plan con Cloud Agents y Automations) | Cuota de OpenCode Go por modelo. El watchdog para a los 900 s sin editar, a los 20400 s de total (5 h 40 min) o a los 5.000.000 de tokens de entrada informados. El job tiene un timeout de 355 min y un 429 lo para sin reintentar |
 
 Notas:
-- **Cursor v3 (opción B, en paralelo).** El orquestador hace `git fetch origin` y congela `BASE_COMMIT = origin/master`. Para cada story crea `git worktree add /tmp/<KEY>-wt -b cursor/<KEY>-<slug> <BASE_COMMIT>` y la verifica con `worktree list`, `show-toplevel`, la rama y `HEAD == BASE_COMMIT`. **Esa verificación es la prueba de aislamiento.** Lanza los builders a la vez y comprueba que el checkout padre sigue limpio (`git status --porcelain`). Para el reviewer, obtiene el diff con git autenticado (`git fetch origin pull/<N>/head`) y se lo pasa en un fichero `.review/pr-<N>-<HEAD>.diff`.
+- **Cursor v3 (opción B, en paralelo).** En cada selección, el orquestador hace `git fetch origin` y registra el SHA de la base seleccionada para cada story admitida. Para cada story crea `git worktree add /tmp/<KEY>-wt -b cursor/<KEY>-<slug> <BASE_COMMIT>` y la verifica con `worktree list`, `show-toplevel`, la rama y `HEAD == BASE_COMMIT`. **Esa verificación es la prueba de aislamiento.** Lanza los builders a la vez y comprueba que el checkout padre sigue limpio (`git status --porcelain`). Para el reviewer, obtiene el diff con git autenticado (`git fetch origin pull/<N>/head`) y se lo pasa en un fichero `.review/pr-<N>-<HEAD>.diff`.
 - **OpenCode v3.** El job `select` (sin LLM) hace el preflight de modelos y elige hasta 3 stories. `check_config.py` reintenta `opencode models opencode-go` hasta 3 veces, con 60 s entre intentos, y si bloquea nombra todos los modelos que faltan, sin sustituirlos. `jira_gate.py` valida la elegibilidad **sin gastar tokens**. El job `factory` es una matriz (`max-parallel: 3`, `fail-fast: false`): cada story tiene su runner, los mismos topes y un `opencode run` vigilado por `guarded_run.py`. `postflight.py` comprueba que existen el Draft PR, el marcador de review en el HEAD y Jira en Human Review. Si un job falla, el diff del builder se guarda como artefacto `opencode-factory-diff-<KEY>` (`.patch`, 7 días) sin hacer push; las otras stories siguen. Tras `CHANGES_REQUESTED`, cada story admite máximo 3 ciclos de corrección y máximo 3 re-revisiones después de la review inicial (4 reviews en total), retomando el mismo builder y la misma rama.
-- **Cron de OpenCode y horario de verano.** GitHub Actions interpreta el cron en UTC. En verano (CEST), las 00:00 de Madrid serían `'0 22 * * *'`. No añadas un segundo schedule que se solape con las ventanas de Claude o Cursor.
+- **Cron de OpenCode y horario de verano.** GitHub Actions interpreta el cron en UTC. En verano (CEST), las 00:00 de Madrid serían `'0 22 * * *'`. Conserva un único schedule de OpenCode por repo.
 
 ## Reglas comunes (todos los providers)
 
 - **Equivalencia de estados del tablero KAN:** **Ready = Listo** y **Done = Finalizada** (In Progress = En curso). Cualquier otro nombre no cuenta como Ready ni como Done.
 - **Elegible** = Listo + `agent-ready` + **exactamente una** etiqueta `engine-*`, la del provider + diseño técnico y criterios de aceptación aprobados + ninguna rama ni PR abierta para esa key.
-- **Puerta de dependencias (falla en cerrado).** Cada blocker real (`is blocked by` / `depends on`) tiene que estar **en Finalizada/Done ahora mismo**. No sirven Human Review, Resolved, `statusCategory = Done` ni un PR mergeado. Si faltan datos, la story se salta. Una issue que la candidata *bloquea* no es un prerequisito. Las stories saltadas se quedan en Listo.
-- **Ramas:** siempre desde `origin/master` justo después de un `git fetch` fresco. Nunca desde un `master` local antiguo ni desde otra rama de feature.
+- **Dependencias.** Una tarea humana pendiente bloquea la candidata. Para una tarea de agente de cualquier proveedor, sirve su cierre en Jira o su PR abierta, identificada en el mismo repo. Si hay varias PR padre, una de sus ramas debe contener los commits de todas.
+- **Ramas y revisión.** Una tarea independiente parte de `origin/master`. Si B depende de la PR abierta de A, su proveedor crea una rama y un worktree propios en el SHA publicado de A. La PR de B apunta a la rama de A e indica la key, la PR y el SHA de cada padre. Así se puede revisar primero A y después el diff propio de B.
 - **PRs:** siempre en **Draft**. Jira solo pasa a **Human Review** con un PASS del reviewer independiente en el HEAD actual del PR.
 - **Configuración cero en OpenCode:** no hay variables nuevas obligatorias ni `issue_key` obligatorio, y las stories no se tocan. Si una story no declara `Repository:`, `Repositorio:` o `Repositorio destino:`, se usa el repo del propio workflow, y una story que nombre otro repo se rechaza. El proyecto Jira por defecto es **`KAN`**. Cursor deduce `owner/repo` del entorno de la Automation. Claude exige que el repo de la story coincida con el de la Routine.
-- **Una sola ejecución por provider y repo.** El estado de Jira no es un lock atómico, así que los horarios deben ser distintos y no solaparse.
+- **Una sola ejecución por proveedor y repo.** Las ejecuciones de proveedores distintos pueden coincidir porque cada tarea tiene una única etiqueta de motor. Dentro del mismo proveedor, evita el solapamiento de runs.
 
 ## Jira: cómo funciona y cómo llega la tarea a los builders
 
@@ -76,8 +76,8 @@ Jira es la **fuente de verdad** de la factoría. Ahí está la especificación a
 
 ```mermaid
 flowchart LR
-  A[Story en Listo<br/>agent-ready + engine-*] -->|Rank ASC, blockers en Finalizada| B[Orquestador]
-  B -->|In Progress| C[Builder<br/>rama desde origin/master]
+  A[Story en Listo<br/>agent-ready + engine-*] -->|Rank ASC, blockers finalizados o cubiertos por una PR padre| B[Orquestador]
+  B -->|In Progress| C[Builder<br/>rama desde la base verificada]
   C --> D[Draft PR]
   D -->|AI Review| E[Reviewer nuevo<br/>diff publicado + spec]
   E -->|CHANGES_REQUESTED| C
@@ -95,7 +95,7 @@ flowchart LR
 | **Repositorio** | Línea `Repository: owner/repo` (OpenCode también acepta `Repositorio:` y `Repositorio destino:`) o un campo propio (`JIRA_REPOSITORY_FIELD_ID`) | OpenCode: si falta, usa el repo del workflow, y si nombra otro repo, la story se rechaza. Cursor: tiene que coincidir con el `owner/repo` de la Automation. Claude: la coincidencia del repo es obligatoria |
 | **Dependencias** | *Linked issues* `is blocked by` / `depends on`, una sección `Dependencies:` / `Dependencias:` en la descripción, frases como «blocked by», «depende de» o «bloqueado por», o un campo propio (`JIRA_DEPENDENCIES_FIELD_ID`) | Todos usan la unión de todas las fuentes. La dirección del enlace importa: lo que la story *bloquea* no es un prerequisito. Si el sentido es ambiguo, la story se salta |
 | **Routing (etiquetas)** | `agent-ready` + **una sola** de `engine-claude`, `engine-cursor` o `engine-opencode` | Cada provider solo coge la suya. Si hay cero o varias etiquetas engine, la saltan todos |
-| **Estado** | `status.name` | Solo cuenta Listo/Ready para elegir y Finalizada/Done para los blockers |
+| **Estado** | `status.name` | Solo cuenta Listo/Ready para elegir y Finalizada/Done para el cierre de un blocker; una tarea de agente puede aportar una PR padre abierta |
 
 ### Estados y quién los mueve
 
@@ -114,8 +114,10 @@ flowchart LR
 
 ### Selección
 
+El máximo es de **tres tareas distintas por proveedor y run**. Cada proveedor arranca las elegibles por Rank. Si solo quedan dependencias de agente pendientes de publicación, consulta Jira y GitHub cada **10 minutos** durante una ventana compartida de **5 h 40 min**. Una PR padre verificada permite lanzar la hija mientras ambas siguen abiertas, incluso entre proveedores. Una dependencia humana pendiente deja la candidata en Listo.
+
 - **Claude y Cursor:** el orquestador busca por MCP las stories en Listo + `agent-ready` ordenadas por `Rank ASC`. Lee el **detalle completo** de cada una (la JQL solo sirve como primer filtro) y toma las **3 primeras elegibles** (`BATCH_LIMIT=3`), siguiendo hacia abajo si se salta alguna. Comprueba los blockers dos veces: al elegir y justo antes de pasar a In Progress.
-- **OpenCode:** si `issue_key` está vacío, el **job `select` sin LLM** elige **hasta 3** stories (`max_issues` 1–3, por defecto 3). Lanza por REST la JQL `project = "KAN" AND labels = "agent-ready" AND labels = "engine-opencode" AND statusCategory != Done ORDER BY Rank ASC`, sin filtrar el estado en la JQL, y valida candidata a candidata leyendo `summary`, `status`, `labels`, `description` e `issuelinks` (más los campos propios, si los hay). Se queda con las que pasan, por Rank, siempre que estén en Listo/Ready, lleven solo `engine-opencode`, tengan los blockers en Finalizada/Done y no exista ya la rama `agent/<key>` ni un PR abierto. Con `issue_key` solo entra esa story. Si ninguna pasa, el resultado es `NO_WORK` y el run acaba en verde. El job `factory` recomprueba esa story y el orquestador vuelve a comprobarlo todo por MCP.
+- **OpenCode:** si `issue_key` está vacío, el **job `select` sin LLM** elige **hasta 3** stories (`max_issues` 1–3, por defecto 3). Lanza por REST la JQL `project = "KAN" AND labels = "agent-ready" AND labels = "engine-opencode" AND statusCategory != Done ORDER BY Rank ASC`, sin filtrar el estado en la JQL, y valida candidata a candidata leyendo `summary`, `status`, `labels`, `description` e `issuelinks` (más los campos propios, si los hay). Se queda con las que pasan, por Rank, siempre que estén en Listo/Ready, lleven solo `engine-opencode`, tengan los blockers finalizados o cubiertos por una PR padre/Done y no exista ya la rama `agent/<key>` ni un PR abierto. Con `issue_key` solo entra esa story. Si al terminar la selección ninguna ha pasado, el resultado es `NO_WORK` y el run acaba en verde. `inspect` y las comprobaciones de una key explícita son inmediatas. El job `factory` recomprueba esa story y el orquestador vuelve a comprobarlo todo por MCP.
 
 ### Inyección: qué recibe cada agente
 
@@ -123,7 +125,7 @@ flowchart LR
 |---|---|---|---|
 | Cómo lee Jira el orquestador | Jira/Atlassian MCP de la Routine | Jira MCP del entorno del Cloud Agent | El runner, por REST (`jira_gate.py`). El orquestador Kimi, por MCP `mcp-atlassian` |
 | Prompt del orquestador | El contrato pegado en la Routine | El contrato pegado en la Automation | `pilot-prompt.md`, donde `guarded_run.py` sustituye `__ISSUE_KEY__` y `__GITHUB_REPOSITORY__`, más el contrato `factory-orchestrator.md` |
-| **Brief al builder** | Key + URL de Jira, spec aprobada **congelada** y completa, criterios de aceptación, `owner/repo`, rama base, commit base y registro `DEPENDENCY_GATE` (`VERIFIED_ALL_DONE` / `VERIFIED_NO_BLOCKERS`). Sin ese registro, el builder devuelve BLOCKED | Spec completa + URL, criterios, repo, `BASE_COMMIT`, rama `cursor/<KEY>-<slug>`, **ruta absoluta del worktree** `/tmp/<KEY>-wt` y las instrucciones aplicables (AGENTS.md) | Key, spec aprobada relevante, criterios, rama `agent/<key>` (creada por el runner desde `origin/master`) y ubicación de los AGENTS.md. La orden es buscar acotado y editar en 10 pasos o menos |
+| **Brief al builder** | Key + URL de Jira, spec aprobada **congelada** y completa, criterios de aceptación, `owner/repo`, rama base, commit base y registro `DEPENDENCY_GATE` (`VERIFIED_ALL_DONE` / `VERIFIED_NO_BLOCKERS` / `VERIFIED_STACK`). Sin ese registro, el builder devuelve BLOCKED | Spec completa + URL, criterios, repo, `BASE_COMMIT`, rama `cursor/<KEY>-<slug>`, **ruta absoluta del worktree** `/tmp/<KEY>-wt` y las instrucciones aplicables (AGENTS.md) | Key, spec aprobada relevante, criterios, rama `agent/<key>` (creada por el runner desde la base verificada) y ubicación de los AGENTS.md. La orden es buscar acotado y editar en 10 pasos o menos |
 | Aislamiento del builder | Worktree propio (`isolation: worktree`) | Worktree creado y verificado por el orquestador | Checkout del runner en la rama de la story (hasta 3 jobs en paralelo, uno por story) |
 | **Lo que recibe el reviewer** | El diff real del PR publicado, la spec de Jira y las convenciones del repo, incluidos los cambios en AGENTS.md | URL y número del PR, `BASE_COMMIT`, `HEAD_COMMIT`, **fichero `.review/pr-<N>-<HEAD>.diff`** obtenido con git autenticado, la ruta del worktree, el diseño original, la evidencia de tests y CI, y los cambios en AGENTS.md | Spec + URL de la issue y URL y HEAD del PR publicado. Lee el diff con `gh pr diff` / `gh pr view` y Jira con `jira_get_issue` / `jira_search`, todo en solo lectura |
 | **Lo que vuelve a GitHub y a Jira** | Draft PR con la URL de Jira, el mapeo de criterios, los tests, AGENTS.md y los riesgos. Informe factual en Jira y transición a Human Review | Draft PR con `Factory Engine: cursor` y `Factory Jira: <KEY>`, la URL de Jira, el mapeo de criterios y los tests. Informe en Jira (key, repo, rama, PR, tests, veredicto y HEAD, AGENTS.md, rondas) y transición | Draft PR con `Factory Engine: opencode` y `Factory Jira: <KEY>`. Al pasar a AI Review se apuntan el enlace y el HEAD. Comentario en el PR con `Factory Review: PASS` / `Factory Review Head: <sha>` / `Factory Reviewer: pr-reviewer` y paso a Human Review. `postflight.py` comprueba el PR, el marcador y el estado |
@@ -227,6 +229,7 @@ Al repo de producto se copian los archivos del provider **con sus mismas rutas**
    .opencode/agents/pr-reviewer.md
    .github/workflows/opencode-factory.yml     # solo este workflow de implementación
    automation/opencode/check_config.py
+   automation/opencode/review_budget.py
    automation/opencode/jira_gate.py
    automation/opencode/guarded_run.py
    automation/opencode/postflight.py
@@ -272,14 +275,14 @@ Para migrar desde paquetes anteriores, mira [`MIGRACION.md`](multiprovider/openc
 
 | Síntoma | Causa probable / qué hacer |
 |---|---|
-| El run termina en verde sin hacer nada (`NO_WORK`) | No hay ninguna story en Listo + `agent-ready` con la etiqueta `engine-*` de ese provider, o todas tienen blockers que no están en Finalizada. |
-| `GATE_BLOCKED` (OpenCode) | La story no está exactamente en Listo/Ready, tiene una etiqueta engine que no toca o más de una, apunta a otro repo, un blocker no está en Finalizada, o ya existe rama o PR. Corrige solo lo que diga el error. |
+| El run termina en verde sin hacer nada (`NO_WORK`) | No hay ninguna story en Listo + `agent-ready` con la etiqueta `engine-*` de ese provider, o todas siguen pendientes de un humano o de una base verificable. |
+| `GATE_BLOCKED` (OpenCode) | La story no está exactamente en Listo/Ready, tiene una etiqueta engine que no toca o más de una, apunta a otro repo, falta una base verificable para algún blocker, o ya existe rama o PR. Corrige solo lo que diga el error. |
 | `CONFIG_BLOCKED` (OpenCode) | Falta un agente o su modelo no coincide, tras 3 intentos (60 s) los IDs siguen sin aparecer en `opencode models opencode-go` (el error nombra todos los que faltan y no sustituye ninguno), falta `OPENCODE_GO_API_KEY`, `ENABLE_OPENCODE_FACTORY_PILOT=false`, o no existe `origin/master`. |
 | `BLOCKED_NO_PROGRESS_TIMEBOUND` / `BLOCKED_QUOTA_429` | 900 s sin editar o cuota agotada. No hay reintento de esa story. Revisa la cuota en la consola Go. El diff parcial está en el artefacto `opencode-factory-diff-<KEY>`. Las otras stories de la matriz siguen. |
 | `POSTFLIGHT_BLOCKED` | No se creó el Draft PR, o el PASS no corresponde al HEAD actual. Jira no pasa a Human Review. |
 | El reviewer de Cursor devuelve 404 o no ve el diff | En repos privados, el orquestador tiene que pasarle el diff autenticado (`git fetch origin pull/<N>/head`) en `.review/`. Vuelve a pegar el contrato v3 en la Automation. |
 | Cursor marca una story `CONFIG_BLOCKED` o `BLOCKED` por worktree | Falló `git worktree add` o su verificación, o un builder escribió en el checkout padre. Las demás stories siguen. |
-| Una story con blocker «mergeado» no arranca | Es lo esperado: el blocker tiene que estar en **Finalizada**, y eso lo pone el humano después del merge. |
+| La PR padre se ha cerrado y su tarea continúa en Human Review | El humano puede confirmar el merge y mover la tarea padre a Finalizada para que la hija parta de `origin/master`. |
 | El run falla al crear el Draft PR: `GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)` | Falta el permiso del repo. Ve a **Settings → Actions → General → Workflow permissions**, marca «Allow GitHub Actions to create and approve pull requests» y pulsa **Save** (paso 3 de OpenCode). La rama ya está en el remoto: comprueba que no haya quedado un PR a medias y relanza. Si la rama existente hace que el gate bloquee la story, bórrala o publica el PR a mano. |
 | Los PR creados por OpenCode no lanzan CI | Un PR abierto con el `GITHUB_TOKEN` de Actions puede no disparar otros workflows. No des el CI por aprobado sin checks reales. |
 

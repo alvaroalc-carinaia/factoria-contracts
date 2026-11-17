@@ -5,7 +5,7 @@
 **Decisión operativa:** el usuario ya ha movido KAN-9 manualmente en Jira y ha decidido implementarla **desde cero**. El paquete NO debe mover la issue de vuelta a Ready, ni intentar restaurar sesiones, worktrees o tareas de GLM-5.3.
 
 1. Confirmar que la ejecución anterior fue cancelada y no sigue activa en GitHub Actions.
-2. (Recomendado) Lanzar `mode=inspect` con `issue_key` vacío o `KAN-9`, **sin LLM y sin cambios en Jira**. No hace falta crear variables ni editar la story. El gate comprueba `Ready`/`Listo`, las etiquetas `agent-ready` + `engine-opencode`, el repo (por defecto el del workflow), los blockers en `Done`/`Finalizada` y la inexistencia de ramas/PR previas.
+2. (Recomendado) Lanzar `mode=inspect` con `issue_key` vacío o `KAN-9`, **sin LLM y sin cambios en Jira**. No hace falta crear variables ni editar la story. El gate comprueba `Ready`/`Listo`, las etiquetas `agent-ready` + `engine-opencode`, el repo (por defecto el del workflow), los blockers finalizados o cubiertos por PRs padre verificadas y la inexistencia de ramas/PR previas.
 3. Si `inspect` devuelve `GATE_BLOCKED`, corregir únicamente la causa identificada. **No hacer otra transición de Jira si ya está Ready.**
 4. Comprobar que hay cuota Go disponible y `Use balance` desactivado.
 5. Ejecutar `mode=build` una única vez (no hace falta `ENABLE_OPENCODE_FACTORY_PILOT`; solo si existe con valor `false` bloquea). El builder será DeepSeek V4.1 Flash; no se reaprovecha contexto de GLM.
@@ -31,7 +31,7 @@
 | Story sin `Repository:` | `inspect` | Usa el repo del workflow |
 | Story con `Repositorio destino:` de otro repo | `inspect` | GATE_BLOCKED |
 | `ENABLE_OPENCODE_FACTORY_PILOT=false` | `build` | CONFIG_BLOCKED (interruptor opcional) |
-| Blocker en Human Review/Resolved | `inspect` | GATE_BLOCKED |
+| Blocker de agente en Human Review con PR padre verificable | `inspect` | Elegible desde la rama y SHA de esa PR; un blocker humano pendiente deja la hija en Listo |
 | Issue blocks (no is blocked by) otra | `inspect` | No tratar esa issue saliente como prerequisite |
 | PR o rama remota ya existente | `build` | GATE_BLOCKED antes de inferencia |
 | Agente lee sin editar durante 900 s | `build` | BLOCKED_NO_PROGRESS_TIMEBOUND + kill group + sin retry |

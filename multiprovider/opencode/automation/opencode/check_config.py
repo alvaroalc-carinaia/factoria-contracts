@@ -92,8 +92,11 @@ def _verificar_cupo_de_review():
     spec = importlib.util.spec_from_file_location("opencode_review_budget", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # multiprovider/opencode/automation/opencode/check_config.py -> repo root.
-    module.verificar_textos(Path(__file__).resolve().parents[4])
+    package = path.parents[2]
+    if package.name == "opencode" and package.parent.name == "multiprovider":
+        module.verificar_textos(package.parent.parent)
+    else:
+        module.verificar_textos(package, instalado=True)
 
 
 def main():

@@ -7,7 +7,8 @@ name: OpenCode Factory - up to 3 issues
 #  - issue_key set     => that story only (max_issues is ignored).
 #  - issue_key empty   => deterministic selection (REST/JQL, NO LLM) of up to
 #    max_issues eligible stories by Rank ASC (1-3, default 3).
-#  - none eligible     => NO_WORK, green, factory matrix does not run.
+#  - automatic build   => start ready work immediately; poll only agent blockers
+#    for unused places. All selections share max_issues and one 340-minute window.
 #  - Ready = Listo and Done = Finalizada (same rule as the Claude/Cursor contracts).
 #  - Repository defaults to this repo when the story does not declare one.
 #  - ENABLE_OPENCODE_FACTORY_PILOT is OPTIONAL: only the literal value 'false'
@@ -15,7 +16,7 @@ name: OpenCode Factory - up to 3 issues
 #  - OPENCODE_VERSION pins the CLI (opencode-ai at that version, not the floating dist-tag).
 # Concurrency is the workflow, not each matrix job: one run per repo.
 # The factory matrix runs up to 3 stories at once (fail-fast off). Each job
-# has the same caps and branches from a fresh fetch of origin/master.
+# starts at the verified PR base and keeps the same build caps.
 # Review budget per story is independent of those caps
 # (automation/opencode/review_budget.py): MAX_CORRECTIONS=3 after
 # CHANGES_REQUESTED, MAX_RE_REVIEWS=3 besides the initial review,
@@ -76,21 +77,26 @@ env:
 jobs:
   select:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
+    timeout-minutes: 355
+    outputs: &selection_outputs
       issues: ${{ steps.gate.outputs.issues }}
       has_work: ${{ steps.gate.outputs.has_work }}
-    permissions:
+      admitted: ${{ steps.gate.outputs.admitted }}
+      deadline: ${{ steps.gate.outputs.deadline }}
+      can_wait: ${{ steps.gate.outputs.can_wait }}
+    permissions: &read_permissions
       contents: read
       pull-requests: read
     steps:
-      - name: Checkout
+      - &select_checkout
+        name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Configure GitHub CLI/git credentials (no write yet)
+      - &select_auth
+        name: Configure GitHub CLI/git credentials (no write yet)
         shell: bash
         run: |
           set -euo pipefail
@@ -118,12 +124,15 @@ jobs:
           MODE: ${{ github.event_name == 'schedule' && 'build' || github.event.inputs.mode }}
           ISSUE_KEY: ${{ github.event_name == 'schedule' && '' || github.event.inputs.issue_key }}
           MAX_ISSUES: ${{ github.event_name == 'schedule' && '3' || github.event.inputs.max_issues }}
+          ENABLE_PILOT: ${{ vars.ENABLE_OPENCODE_FACTORY_PILOT }}
         run: |
           set -euo pipefail
           # Empty ISSUE_KEY => deterministic auto-selection (no LLM). NO_WORK exits 0.
           # issue_key set => that key only. max_issues is 1-3 (default 3).
-          python automation/opencode/jira_gate.py \
-            --issue "$ISSUE_KEY" --mode "$MODE" --max-issues "${MAX_ISSUES:-3}"
+          wait_args=()
+          if [ "$ENABLE_PILOT" != "false" ]; then wait_args+=(--wait); fi
+          python automation/opencode/jira_gate.py --issue "$ISSUE_KEY" --mode "$MODE" \
+            --max-issues "${MAX_ISSUES:-3}" "${wait_args[@]}"
 
   factory:
     needs: select
@@ -135,12 +144,12 @@ jobs:
       max-parallel: 3
       matrix:
         issue: ${{ fromJson(needs.select.outputs.issues || '[]') }}
-    permissions:
+    permissions: &build_permissions
       contents: write
       pull-requests: write
       issues: write
 
-    steps:
+    steps: &build_steps
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -195,29 +204,42 @@ jobs:
           fi
           echo "Build enabled (ENABLE_OPENCODE_FACTORY_PILOT='${ENABLE_PILOT:-<unset>}')"
 
+      - name: Preserve the verified factory runtime before switching branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/factory-runtime"
+          git archive HEAD -- automation/opencode .opencode opencode.json |
+            tar -x -C "$RUNNER_TEMP/factory-runtime"
+
       - name: Prepare dedicated feature branch (NO LLM)
         id: branch
         if: ${{ (github.event_name == 'schedule' || github.event.inputs.mode == 'build') && steps.gate.outputs.has_work == 'true' }}
         shell: bash
         env:
           BRANCH: ${{ steps.gate.outputs.branch }}
+          PR_BASE: ${{ steps.gate.outputs.base_branch }}
+          PARENT_SHA: ${{ steps.gate.outputs.base_sha }}
         run: |
           set -euo pipefail
-          # Factory rule (all providers): feature branches come from a FRESH
-          # fetch of origin/master, never from a stale local branch.
           DEFAULT_BRANCH="master"
-          if ! git ls-remote --exit-code --heads origin master >/dev/null; then
-            echo 'CONFIG_BLOCKED: origin/master not found; factory base branch must be master'
+          if [ "$PR_BASE" = "$DEFAULT_BRANCH" ]; then
+            git fetch origin "$DEFAULT_BRANCH"
+          else
+            git check-ref-format "refs/heads/$PR_BASE"
+            git fetch origin "refs/heads/$PR_BASE"
+          fi
+          BASE_SHA="$(git rev-parse FETCH_HEAD)"
+          if [ -n "$PARENT_SHA" ] && [ "$BASE_SHA" != "$PARENT_SHA" ]; then
+            echo "GATE_BLOCKED: parent branch changed since Jira/PR verification"
             exit 2
           fi
-          git fetch origin "$DEFAULT_BRANCH"
-          BASE_SHA="$(git rev-parse "origin/$DEFAULT_BRANCH")"
           git switch -c "$BRANCH" "$BASE_SHA"
           gh auth setup-git
           git config user.name 'agentic-factory[bot]'
           git config user.email 'agentic-factory@users.noreply.github.com'
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
-          echo "Prepared $BRANCH from freshly fetched origin/$DEFAULT_BRANCH ($BASE_SHA)"
+          echo "Prepared $BRANCH from origin/$PR_BASE ($BASE_SHA)"
 
       - name: One guarded Kimi K3.1 Pro + DeepSeek V4.1 Flash + Kimi K3.1 Pro execution
         if: ${{ (github.event_name == 'schedule' || github.event.inputs.mode == 'build') && steps.gate.outputs.has_work == 'true' }}
@@ -225,9 +247,16 @@ jobs:
         env:
           ISSUE_KEY: ${{ steps.gate.outputs.issue }}
           BASE_SHA: ${{ steps.branch.outputs.base_sha }}
+          PR_BASE: ${{ steps.gate.outputs.base_branch }}
+          STACK_PARENTS: ${{ steps.gate.outputs.parents }}
         run: |
           set -euo pipefail
-          python automation/opencode/guarded_run.py \
+          if [ "$PR_BASE" != "master" ]; then
+            export OPENCODE_DISABLE_PROJECT_CONFIG=true
+            export OPENCODE_CONFIG="$RUNNER_TEMP/factory-runtime/opencode.json"
+            export OPENCODE_CONFIG_DIR="$RUNNER_TEMP/factory-runtime/.opencode"
+          fi
+          python "$RUNNER_TEMP/factory-runtime/automation/opencode/guarded_run.py" \
             --issue "$ISSUE_KEY" --base "$BASE_SHA" \
             --no-edit-seconds 900 --total-seconds 20400 \
             --max-reported-input-tokens 5000000
@@ -281,9 +310,12 @@ jobs:
         shell: bash
         env:
           ISSUE_KEY: ${{ steps.gate.outputs.issue }}
+          PR_BASE: ${{ steps.gate.outputs.base_branch }}
+          PARENT_SHA: ${{ steps.gate.outputs.base_sha }}
         run: |
           set -euo pipefail
-          python automation/opencode/postflight.py --issue "$ISSUE_KEY"
+          python "$RUNNER_TEMP/factory-runtime/automation/opencode/postflight.py" \
+            --issue "$ISSUE_KEY" --base-branch "$PR_BASE" --parent-sha "$PARENT_SHA"
 
       - name: Upload sanitized execution summary (NO raw LLM/Jira logs)
         if: ${{ always() && (github.event_name == 'schedule' || github.event.inputs.mode == 'build') && steps.gate.outputs.has_work == 'true' }}
@@ -293,3 +325,64 @@ jobs:
           path: ${{ runner.temp }}/opencode-factory-summary.json
           if-no-files-found: ignore
           retention-days: 7
+
+  # The selectors form one chain; each factory can start alongside the next
+  # selector. Even single-issue waves can fill all three places in this run.
+  select_second:
+    needs: select
+    if: ${{ needs.select.outputs.can_wait == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    permissions: *read_permissions
+    outputs: *selection_outputs
+    env:
+      ADMITTED: ${{ needs.select.outputs.admitted }}
+      DEADLINE: ${{ needs.select.outputs.deadline }}
+    steps: &reselect_steps
+      - *select_checkout
+      - *select_auth
+      - name: Fill remaining places by Rank (ZERO LLM tokens)
+        id: gate
+        env:
+          MAX_ISSUES: ${{ github.event.inputs.max_issues || '3' }}
+        run: |
+          python automation/opencode/jira_gate.py --mode build --wait \
+            --max-issues "$MAX_ISSUES" --admitted "$ADMITTED" --deadline "$DEADLINE"
+
+  factory_second:
+    needs: select_second
+    if: ${{ needs.select_second.outputs.has_work == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        issue: ${{ fromJson(needs.select_second.outputs.issues || '[]') }}
+    permissions: *build_permissions
+    steps: *build_steps
+
+  select_third:
+    needs: select_second
+    if: ${{ needs.select_second.outputs.can_wait == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    permissions: *read_permissions
+    outputs: *selection_outputs
+    env:
+      ADMITTED: ${{ needs.select_second.outputs.admitted }}
+      DEADLINE: ${{ needs.select_second.outputs.deadline }}
+    steps: *reselect_steps
+
+  factory_third:
+    needs: select_third
+    if: ${{ needs.select_third.outputs.has_work == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        issue: ${{ fromJson(needs.select_third.outputs.issues || '[]') }}
+    permissions: *build_permissions
+    steps: *build_steps
