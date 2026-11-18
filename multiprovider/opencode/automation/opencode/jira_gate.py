@@ -36,7 +36,7 @@ REPO_LINE = re.compile(
 TEXT_BLOCKER = re.compile(
     r"(?i)\b(?:blocked\s+by|is\s+blocked\s+by|depends\s+on|requires|"
     r"bloquead[oa]\s+por|depende\s+de|prerrequisito(?:s)?)\s*\)?\s*[:\-]?\s*"
-    r"((?:[A-Z][A-Z0-9_]*-[0-9]+)(?:\s*[,;/y&]\s*"
+    r"((?:[A-Z][A-Z0-9_]*-[0-9]+)(?:(?:\s*[,;/y&()])+\s*"
     r"[A-Z][A-Z0-9_]*-[0-9]+)*)"
 )
 BLOCKER_WORDS = ("is blocked by", "blocked by", "depends on", "requires", "depende de", "bloqueado por", "bloqueada por")
@@ -131,10 +131,21 @@ def declared_repositories(description):
     return found
 
 
-def extract_text_blockers(text):
+def extract_text_blockers(text, project=None):
+    """Issue keys cited as blockers. Only ``project`` counts (``JIRA_PROJECT_KEY`` or KAN).
+
+    A pull-request number such as ``PR-1`` matches the key shape but is not an
+    issue of this project and must not be fetched. Parenthetical keys stay:
+    ``Depende de PR-1 (KAN-75)`` yields ``KAN-75``.
+    """
+    project = project or project_key()
     blockers = set()
+
+    def keep(keys):
+        return {key for key in keys if key.split("-", 1)[0] == project}
+
     for m in TEXT_BLOCKER.finditer(text):
-        blockers.update(re.findall(r"[A-Z][A-Z0-9_]*-\d+", m.group(1)))
+        blockers.update(keep(re.findall(r"[A-Z][A-Z0-9_]*-\d+", m.group(1))))
     # Support explicit '## Dependencies' sections when an item is just an issue key.
     lines = text.splitlines()
     in_section = False
@@ -146,10 +157,11 @@ def extract_text_blockers(text):
             if not empty_dependency_value(value):
                 keys = re.findall(r"\b[A-Z][A-Z0-9_]*-\d+\b", line.partition(":")[2])
                 # Prerequisites can also describe the software environment.
+                # Judge ambiguity on the raw tokens, then drop other projects.
                 if not keys and (header.strip() not in ("prerequisites", "prerrequisitos")
                                  or any(word in value for word in BLOCKER_WORDS + ("pending", "pendiente", "blocked", "bloquead"))):
                     raise GateError("Ambiguous textual dependency without Jira key")
-                blockers.update(keys)
+                blockers.update(keep(keys))
             continue
         if line.lstrip().startswith("#"):
             in_section = any(stripped.startswith(h) for h in DEPENDENCY_HEADERS)
@@ -157,7 +169,7 @@ def extract_text_blockers(text):
         if in_section and (line.strip() == "" or line.lstrip().startswith(("-", "*"))):
             if any(word in stripped for word in ("none", "ninguna", "ninguno")):
                 continue
-            blockers.update(re.findall(r"\b[A-Z][A-Z0-9_]*-\d+\b", line))
+            blockers.update(keep(re.findall(r"\b[A-Z][A-Z0-9_]*-\d+\b", line)))
         elif in_section and line.strip() and not line.lstrip().startswith(("-", "*")):
             # A section with unclear prose: leave interpretation to orchestrator;
             # a documented ambiguity would be safer than trusting a clean gate.
@@ -236,7 +248,14 @@ def jira_client():
         try:
             with urllib.request.urlopen(req, timeout=20) as reply:
                 return json.load(reply)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+        except urllib.error.HTTPError as exc:
+            # 404: that issue is gone. Skip only the story that needed it.
+            # 401/403/5xx still abort; the code is part of the message.
+            message = f"Cannot read Jira {key}: HTTP {exc.code}"
+            if exc.code == 404:
+                raise GateError(message) from None
+            raise GateInfraError(message) from None
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             raise GateInfraError(f"Cannot read Jira {key}: {type(exc).__name__}") from None
     return get_issue
 
@@ -417,12 +436,16 @@ def verify_ready_blocker(key, fields, engine, repo, get_prs, check_github):
 
 
 def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wait, path):
-    blockers = blocking_links(fields.get("issuelinks")) | extract_text_blockers(flatten_adf(fields.get("description")))
+    project = project_key(path[0] if path else "")
+    blockers = blocking_links(fields.get("issuelinks")) | extract_text_blockers(
+        flatten_adf(fields.get("description")), project)
     deps_field = os.environ.get("JIRA_DEPENDENCIES_FIELD_ID", "").strip()
     if deps_field:
         if deps_field not in fields:
             raise GateError("Configured Jira dependency field missing")
         blockers.update(dependency_field_keys(fields[deps_field]))
+    # Links and dependency fields can also name another project (or "PR-1").
+    blockers = {key for key in blockers if key.split("-", 1)[0] == project}
     for dependency in sorted(blockers.intersection(path)):
         cycle = path[path.index(dependency):] + (dependency,)
         raise GateError("Dependency cycle: " + " -> ".join(cycle))
@@ -451,14 +474,17 @@ def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wai
         reason = f"Blocker {dependency} is {status!r}, not exact Done/Finalizada; no verified parent PR"
         if not evaluate_wait or status.casefold() == human_review:
             raise GateError(reason)
+        # Same rule as Claude/Cursor: a Listo blocker is traced by key. An
+        # unpublished agent prerequisite (Listo, In Progress or AI Review)
+        # keeps this run polling. A human hold, a cycle or Human Review
+        # without a PR raises above and does not keep the run waiting.
+        nested_pending = ()
         if ready:
-            # Only a blocker that has yet to start needs its readiness checked.
-            dependency_plan(dep_fields, repo, get_issue, get_prs, check_github,
-                            evaluate_wait, path + (dependency,))
-        if len(path) > 1:
-            raise GateError(f"{path[-1]} cannot start: {reason}")
-        if ready:
+            _, _, _, nested_pending = dependency_plan(
+                dep_fields, repo, get_issue, get_prs, check_github,
+                evaluate_wait, path + (dependency,))
             verify_ready_blocker(dependency, dep_fields, engine, repo, get_prs, check_github)
+        pending.extend(nested_pending)
         pending.append(reason)
     base = stack_base(repo, parents) if parents else {"branch": "master", "sha": ""}
     return blockers, parents, base, pending
