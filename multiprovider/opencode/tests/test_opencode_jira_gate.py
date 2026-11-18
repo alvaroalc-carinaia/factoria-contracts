@@ -1,5 +1,7 @@
 """Unit tests without networking / provider quota."""
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import unittest
@@ -80,6 +82,30 @@ class JiraGateTests(unittest.TestCase):
 
     def test_explicit_text_blocker(self):
         self.assertIn('KAN-20', mod.extract_text_blockers('Blocked by KAN-20'))
+
+    def test_pull_request_number_is_not_a_project_blocker(self):
+        phrase = 'Depende de PR-1 (KAN-75)'
+        self.assertEqual(mod.extract_text_blockers(phrase), {'KAN-75'})
+        with patch.dict(os.environ, {'JIRA_PROJECT_KEY': 'ABC'}):
+            self.assertEqual(mod.extract_text_blockers('Depende de PR-1 (ABC-4)'), {'ABC-4'})
+            self.assertEqual(mod.extract_text_blockers(phrase), set())
+        desc = ('Repository: owner/repo\n## Diseño técnico aprobado\n'
+                'Implementar la feature con casos de aceptación y pruebas.\n' + phrase)
+        links = [{'type': {'name': 'Blocks', 'inward': 'is blocked by', 'outward': 'blocks'},
+                  'inwardIssue': {'key': 'PR-1'}}]
+        fetched = []
+
+        def get(key):
+            fetched.append(key)
+            if key == 'PR-1':
+                raise AssertionError('PR-1 must not be fetched')
+            if key == 'KAN-77':
+                return issue('KAN-77', description=desc, links=links)
+            return issue(key, status='Finalizada')
+
+        result = mod.validate('KAN-77', 'inspect', get, False)
+        self.assertEqual(result['blockers'], ['KAN-75'])
+        self.assertNotIn('PR-1', fetched)
 
     def test_never_emit_fake_token_usage(self):
         self.assertEqual(mod.flatten_adf({'type':'doc','content':[{'type':'paragraph','content':[{'type':'text','text':'Repository: owner/repo'}]}]}), 'Repository: owner/repo')
@@ -574,6 +600,74 @@ class DependencyWaitTests(unittest.TestCase):
         self.assertFalse(more)
         self.assertIn('KAN-9', skipped[0]['reason'])
         self.sleep.assert_not_called()
+
+
+class MissingBlockerTests(unittest.TestCase):
+    """A 404 on one blocker skips that story. Auth, 5xx and network errors abort."""
+
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {
+            'JIRA_PROJECT_KEY': 'KAN', 'GITHUB_REPOSITORY': 'owner/repo',
+            'JIRA_URL': 'https://example.test', 'JIRA_USERNAME': 'user', 'JIRA_API_TOKEN': 'test',
+        }, clear=False))
+
+    def _select(self, urlopen, keys):
+        with patch.object(mod.urllib.request, 'urlopen', urlopen):
+            return mod.select('inspect', mod.jira_client(), lambda j, l=50: keys, check_github=False)
+
+    def _stories(self, missing):
+        stories = {
+            'KAN-1': issue('KAN-1', links=[{'type': BLOCKS, 'inwardIssue': {'key': missing}}]),
+            'KAN-2': issue('KAN-2', status='Listo', description=PLAIN),
+            'KAN-3': issue('KAN-3', status='Listo', description=PLAIN),
+        }
+
+        def urlopen(req, timeout=20):
+            key = mod.urllib.parse.unquote(req.full_url).split('/issue/')[1].split('?')[0]
+            code = 404 if key == missing else None
+            if code:
+                raise mod.urllib.error.HTTPError(req.full_url, code, 'missing', None, None)
+            return io.BytesIO(json.dumps(stories[key]).encode())
+
+        return urlopen
+
+    def test_blocker_404_skips_story_and_run_continues(self):
+        urlopen = self._stories('KAN-8')
+        with patch.object(mod.urllib.request, 'urlopen', urlopen):
+            get = mod.jira_client()
+            with self.assertRaises(mod.GateError) as caught:
+                get('KAN-8')
+            self.assertNotIsInstance(caught.exception, mod.GateInfraError)
+            self.assertIn('HTTP 404', str(caught.exception))
+        chosen, skipped = self._select(urlopen, ['KAN-1', 'KAN-2', 'KAN-3'])
+        self.assertEqual([item['issue'] for item in chosen], ['KAN-2', 'KAN-3'])
+        self.assertEqual([item['issue'] for item in skipped], ['KAN-1'])
+        self.assertIn('HTTP 404', skipped[0]['reason'])
+        self.assertFalse(skipped[0]['waitable'])
+
+    def test_blocker_server_auth_and_network_errors_abort(self):
+        stories = {
+            'KAN-1': issue('KAN-1', links=[{'type': BLOCKS, 'inwardIssue': {'key': 'KAN-8'}}]),
+            'KAN-2': issue('KAN-2', status='Listo', description=PLAIN),
+        }
+        for code in (401, 403, 500, 503):
+            with self.subTest(code=code):
+                def urlopen(req, timeout=20, code=code):
+                    key = mod.urllib.parse.unquote(req.full_url).split('/issue/')[1].split('?')[0]
+                    if key == 'KAN-8':
+                        raise mod.urllib.error.HTTPError(req.full_url, code, 'err', None, None)
+                    return io.BytesIO(json.dumps(stories[key]).encode())
+
+                with self.assertRaises(mod.GateInfraError) as caught:
+                    self._select(urlopen, ['KAN-1', 'KAN-2'])
+                self.assertIn(f'HTTP {code}', str(caught.exception))
+
+        def network(req, timeout=20):
+            raise mod.urllib.error.URLError('down')
+
+        with self.assertRaises(mod.GateInfraError) as caught:
+            self._select(network, ['KAN-1', 'KAN-2'])
+        self.assertIn('URLError', str(caught.exception))
 
 
 class SearchPaginationTests(unittest.TestCase):
