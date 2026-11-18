@@ -474,14 +474,17 @@ def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wai
         reason = f"Blocker {dependency} is {status!r}, not exact Done/Finalizada; no verified parent PR"
         if not evaluate_wait or status.casefold() == human_review:
             raise GateError(reason)
+        # Same rule as Claude/Cursor: a Listo blocker is traced by key. An
+        # unpublished agent prerequisite (Listo, In Progress or AI Review)
+        # keeps this run polling. A human hold, a cycle or Human Review
+        # without a PR raises above and does not keep the run waiting.
+        nested_pending = ()
         if ready:
-            # Only a blocker that has yet to start needs its readiness checked.
-            dependency_plan(dep_fields, repo, get_issue, get_prs, check_github,
-                            evaluate_wait, path + (dependency,))
-        if len(path) > 1:
-            raise GateError(f"{path[-1]} cannot start: {reason}")
-        if ready:
+            _, _, _, nested_pending = dependency_plan(
+                dep_fields, repo, get_issue, get_prs, check_github,
+                evaluate_wait, path + (dependency,))
             verify_ready_blocker(dependency, dep_fields, engine, repo, get_prs, check_github)
+        pending.extend(nested_pending)
         pending.append(reason)
     base = stack_base(repo, parents) if parents else {"branch": "master", "sha": ""}
     return blockers, parents, base, pending

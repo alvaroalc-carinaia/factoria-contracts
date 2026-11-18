@@ -570,24 +570,55 @@ class DependencyWaitTests(unittest.TestCase):
                 self.assertEqual([r['issue'] for r in chosen], ['KAN-11'])
                 self.assertEqual(chosen[0]['parents'][0]['issue'], 'KAN-12')
 
-    def test_ready_blocker_must_be_runnable_now(self):
-        self.sleep.side_effect = AssertionError("unexpected poll")
+    def test_ready_blocker_traces_unpublished_agent_and_other_work_starts(self):
         self.candidate('KAN-1', ['KAN-2'])
         self.candidate('KAN-2', ['KAN-3'])
         self.data['KAN-2']['fields']['labels'] = ['agent-ready', 'engine-claude']
         self.data['KAN-3'] = issue('KAN-3', status='En curso')
-        chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
+        chosen, skipped = mod.select('build', self.data.__getitem__, lambda *_: ['KAN-1'],
+                                     check_github=True, evaluate_wait=True)
         self.assertEqual(chosen, [])
-        self.assertFalse(more)
-        self.assertIn('KAN-2 cannot start', skipped[0]['reason'])
-        self.sleep.assert_not_called()
-        # The same Ready blocker can start on a published agent PR.
+        self.assertTrue(skipped[0]['waitable'])
+        self.assertIn('KAN-3', skipped[0]['reason'])
+        # A published PR makes that Listo blocker admissible. Rank work starts
+        # now; the child keeps its place in the same window.
         self.prs.return_value = [self.parent('KAN-3', 'opencode')]
         self.candidate('KAN-5')
         chosen, skipped, more = mod.select_wave('build', 3, [], 1900)
         self.assertEqual([r['issue'] for r in chosen], ['KAN-5'])
         self.assertTrue(more)
         self.assertTrue(skipped[0]['waitable'])
+        self.sleep.assert_not_called()
+
+    def test_traced_blocker_done_during_poll_starts_child_from_master(self):
+        self.candidate('KAN-1', ['KAN-2'])
+        self.data['KAN-2'] = issue('KAN-2', status='Listo', labels=['agent-ready', 'engine-claude'],
+                                   links=[{'type': BLOCKS, 'inwardIssue': {'key': 'KAN-3'}}])
+        self.data['KAN-3'] = issue('KAN-3', status='En curso', labels=['agent-ready', 'engine-cursor'])
+
+        def unlock(_):
+            self.data['KAN-3'] = issue('KAN-3', status='Finalizada', labels=[])
+            self.data['KAN-2'] = issue('KAN-2', status='Finalizada', labels=[])
+
+        self.sleep.side_effect = unlock
+        chosen, _, more = mod.select_wave('build', 1, [], 1900)
+        self.sleep.assert_called_once_with(mod.POLL_SECONDS)
+        self.assertEqual([r['issue'] for r in chosen], ['KAN-1'])
+        self.assertEqual(chosen[0]['base_branch'], 'master')
+        self.assertFalse(more)
+
+    def test_traced_blocker_still_open_does_not_start_child(self):
+        self.candidate('KAN-1', ['KAN-2'])
+        self.data['KAN-2'] = issue('KAN-2', status='Listo', labels=['agent-ready', 'engine-claude'],
+                                   links=[{'type': BLOCKS, 'inwardIssue': {'key': 'KAN-3'}}])
+        self.data['KAN-3'] = issue('KAN-3', status='AI Review', labels=['agent-ready', 'engine-cursor'])
+        self.now.side_effect = [100, 112]
+        chosen, skipped, more = mod.select_wave('build', 1, [], 112)
+        self.sleep.assert_called_once_with(12)
+        self.assertEqual(chosen, [])
+        self.assertTrue(skipped[0]['waitable'])
+        self.assertIn('KAN-3', skipped[0]['reason'])
+        self.assertFalse(more)
 
     def test_custom_dependency_field_includes_human_blocker(self):
         self.enterContext(patch.dict(os.environ, {'JIRA_DEPENDENCIES_FIELD_ID': 'customfield_100'}))
