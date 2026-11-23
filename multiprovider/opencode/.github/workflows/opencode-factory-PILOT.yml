@@ -71,7 +71,14 @@ jobs:
           prompt: |
             MANUAL PILOT. Requested issue key: "${{ inputs.issue_key }}"
 
-            Treat status Ready and Listo as the same, and
+            Use the configured Jira project for both selection and explicit keys.
+            In PB, Ready means status 10015 (Tareas por hacer) in an active
+            sprint of board 6. Include sprint in openSprints() and status = 10015
+            in the candidate JQL. Recheck sprint, status and labels before claim.
+            Claim En curso (10016), stay there during AI review and corrections,
+            and use CODE REVIEW (10048) for the Human Review handoff below.
+
+            Outside PB, treat status Ready and Listo as the same, and
             Done and Finalizada as the same, in every check.
 
             If the requested issue key is non-empty, process

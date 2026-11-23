@@ -41,12 +41,14 @@ No reemplaces `AGENTS.md`, `.claude/agents/` ni `.cursor/agents/`.
 
 ## 4. Jira — no hay que cambiar ninguna story
 
-Funciona igual que el piloto anterior (Licitaciones PR #16 / contracts PR #5): las stories se quedan como están.
+Para PB, configura `JIRA_PROJECT_KEY=PB`. El gate comprueba **Tareas por hacer**, el sprint activo del tablero 6, `agent-ready` y únicamente `engine-opencode`. El agente reclama en **En curso** y entrega en **CODE REVIEW** después del PASS independiente y las pruebas.
 
-- La issue debe estar en `Ready`/`Listo`, tener `agent-ready` y **solo** `engine-opencode` entre las tres etiquetas de motores.
+En KAN funciona igual que el piloto anterior (Licitaciones PR #16 / contracts PR #5): las stories se quedan como están.
+
+- La issue debe estar en `Ready`/`Listo`, tener `agent-ready` y **solo** `engine-opencode` entre las etiquetas de motores.
 - **Repositorio:** si la story no declara repositorio, se usa el repo donde corre el workflow (`GITHUB_REPOSITORY`). Se aceptan `Repository: owner/repo`, `Repositorio: owner/repo` y `Repositorio destino: owner/repo` (con negrita/código Markdown o URL de GitHub). Si la story nombra **otro** repo, el gate falla. `JIRA_REPOSITORY_FIELD_ID` es opcional, solo si algún día usas un campo propio.
 - Dependencias: enlaces estructurados de Jira y referencias textuales explícitas (incluida la línea `Dependencias (is blocked by): KAN-8, …` de las stories KAN). `JIRA_DEPENDENCIES_FIELD_ID` es opcional. **La lectura de dependencias ambigua todavía bloquea según el contrato del orquestador**.
-- **Equivalencia de estados (misma regla que Claude y Cursor, copiada de `multiprovider/claude/01-jira-three-parallel-STRICT-ROUTING.md`):** `Ready` = `Listo` y `Done` = `Finalizada` en todas las comprobaciones (selección, gate de dependencias y re-checks). Cualquier otro nombre no es Ready/Done; solo se normalizan mayúsculas y espacios. Por eso `JIRA_READY_STATUS`/`JIRA_DONE_STATUS` ya no se usan: no hay nada que configurar y los tres providers se comportan igual.
+- **Equivalencia de estados (misma regla que Claude y Cursor, copiada de `multiprovider/claude/01-jira-three-parallel-STRICT-ROUTING.md`):** `Ready` = `Listo` y `Done` = `Finalizada` en todas las comprobaciones (selección, gate de dependencias y re-checks). Cualquier otro nombre no es Ready/Done; solo se normalizan mayúsculas y espacios. Por eso `JIRA_READY_STATUS`/`JIRA_DONE_STATUS` ya no se usan: no hay nada que configurar y los proveedores se comportan igual.
 - **Sin `issue_key`:** el job `select` elige sin LLM (REST/JQL `project = KAN AND labels = agent-ready AND labels = engine-opencode … ORDER BY Rank ASC`) hasta `max_issues` stories (1–3, por defecto 3): `Ready`/`Listo`, solo `engine-opencode`, repo correcto, todos los blockers finalizados o cubiertos por PRs padre verificadas y sin rama `agent/<clave>` ni PR abierta. El job `factory` las ejecuta en paralelo (`max-parallel: 3`, `fail-fast: false`), cada una desde un fetch de la rama base verificada y con los mismos topes. Con `issue_key` solo esa story. Con cupo libre y blockers de agente pendientes, vuelve a consultar Jira cada 10 minutos durante 5 h 40 min como máximo mientras ejecuta las stories admitidas. Si termina sin admitir ninguna, `NO_WORK` en verde.
 - El runner obtiene la rama base con un fetch, comprueba el SHA de la PR padre si la hay y crea desde ese commit la rama propia de la hija.
 - Si no hay transición disponible a In Progress, AI Review o Human Review, el piloto debe parar sin simularla.

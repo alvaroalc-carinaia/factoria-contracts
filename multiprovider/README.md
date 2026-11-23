@@ -1,6 +1,6 @@
-# Agentic Factory | Multi-provider v2 | Cursor orchestration parity pilot
+# Agentic Factory | Multi-provider
 
-Updated 2026-10-28. **v2 supersedes v1's split Cursor build/review Automations.** Claude nightly batch is already working and remains unchanged except the previously prepared STRICT ENGINE ROUTING prompt. OpenCode runs up to 3 issues per workflow (matrix, `fail-fast: false`, one guarded invocation per story): orchestrator and reviewer `opencode-go/kimi-k3.1-pro`, builder `opencode-go/deepseek-v4.1-flash`, CLI `OPENCODE_VERSION: 1.19.4`, daily GitHub Actions cron `0 23 * * *` (00:00 Europe/Madrid en invierno, CET; en verano, CEST, sería `0 22 * * *`).
+**v2 supersedes v1's split Cursor build/review Automations.** Claude nightly batch is already working and remains unchanged except the previously prepared STRICT ENGINE ROUTING prompt. OpenCode runs up to 3 issues per workflow (matrix, `fail-fast: false`, one guarded invocation per story): orchestrator and reviewer `opencode-go/kimi-k3.1-pro`, builder `opencode-go/deepseek-v4.1-flash`, CLI `OPENCODE_VERSION: 1.19.4`, daily GitHub Actions cron `0 23 * * *` (00:00 Europe/Madrid en invierno, CET; en verano, CEST, sería `0 22 * * *`).
 
 ## What changes in v2?
 
@@ -30,7 +30,7 @@ Cursor docs prioritize `.cursor/agents` over equivalent `.claude/agents` files, 
 
 ## Install / activate in order
 
-1. **Jira router first.** Keep EXACTLY one label per Ready issue: `engine-claude`, `engine-cursor`, or `engine-opencode`, plus `agent-ready`, exact Repository and full approved spec. Each blocker must be Done or covered by a verified parent PR from any of the three providers. See `jira/ROUTING.md`.
+1. **Jira router first.** Keep EXACTLY one label per Ready issue: `engine-claude`, `engine-cursor`, `engine-opencode`, or `engine-openai`, plus `agent-ready`, exact Repository and full approved spec. Each blocker must be Done or covered by a verified parent PR from any supported provider. See `jira/ROUTING.md`.
 2. **Protect Claude.** Ensure Claude Ready issues carry `engine-claude` and that your existing Claude Routine uses `claude/01-jira-three-parallel-STRICT-ROUTING.md`. Do not change proven Claude feature-builder/pr-reviewer files.
 3. **Commit only the two Cursor agent files** from `cursor/.cursor/agents/` into your product repo's `.cursor/agents/` and push. Leave `AGENTS.md` as-is.
 4. **Cursor account entitlement:** verify that your Cursor plan actually enables Cloud Agents and Automations. Current docs put these capabilities on Premium and above; Cursor Plus does not provide them. Do not assume Grokbot access implies an Automation subscription. Billing is based on cloud agent usage.
@@ -42,9 +42,10 @@ Cursor docs prioritize `.cursor/agents` over equivalent `.claude/agents` files, 
 
 ## Files outside Cursor
 
-- `claude/01-jira-three-parallel-STRICT-ROUTING.md`: the full existing Claude prompt with multi-provider labels, strict Done gate and Opus-owned AGENTS.md edits (unchanged from v1).
+- `claude/01-jira-three-parallel-STRICT-ROUTING.md`: the full existing Claude prompt with multi-provider labels, strict Done gate and Opus-owned AGENTS.md edits.
 - `contracts/PORTABLE-CONTRACT.md`: source-neutral policy; now supplemented for Cursor's single-automation review cycle.
-- `jira/ROUTING.md`: Jira tagging convention and query templates (unchanged).
+- `jira/ROUTING.md`: Jira tagging convention and query templates for all providers.
+- [`openai/`](openai/README.md): Codex Cloud setup and hosted pilot. GPT-6.2 Astra orchestrates and independently reviews each published head. GPT-6.2 Sol builds in a dedicated worktree.
 - `opencode/`: OpenCode Go CLI/GitHub Actions setup. `opencode-factory.yml` selects up to 3 `engine-opencode` stories per run and executes them in parallel, daily at 00:00 Europe/Madrid in winter (`cron: '0 23 * * *'`; summer/CEST would be `'0 22 * * *'`).
 
 ## Explicit limitations, not hidden functionality

@@ -13,6 +13,8 @@ import subprocess
 import sys
 import urllib.request
 
+from jira_gate import PB_REVIEW, project_key
+
 
 def gh(*args):
     p = subprocess.run(["gh", *args], capture_output=True, text=True, check=False, timeout=30)
@@ -58,22 +60,25 @@ def main():
         and "Factory Reviewer: pr-reviewer" in c for c in comments
     )
     if not review_claim:
-        raise RuntimeError("No reviewer PASS marker tied to actual published PR HEAD; remain in AI Review")
+        raise RuntimeError("No reviewer PASS marker tied to actual published PR HEAD")
     root = os.environ["JIRA_URL"].rstrip("/")
     auth = base64.b64encode((os.environ["JIRA_USERNAME"] + ":" + os.environ["JIRA_API_TOKEN"]).encode()).decode()
     req = urllib.request.Request(root + "/rest/api/3/issue/" + key + "?fields=status",
                                  headers={"Authorization": "Basic " + auth, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as reply:
-            status = ((json.load(reply).get("fields") or {}).get("status") or {}).get("name")
+            status = (json.load(reply).get("fields") or {}).get("status") or {}
     except Exception:
         raise RuntimeError("Cannot verify Jira final status") from None
     # Default "Human Review" (no variable needed); the env var is an optional override.
     expected = (os.environ.get("JIRA_HUMAN_REVIEW_STATUS") or "").strip() or "Human Review"
-    if " ".join(str(status or "").split()).casefold() != expected.casefold():
+    if project_key(key) == "PB":
+        if status.get("id") != PB_REVIEW:
+            raise RuntimeError(f"Expected PB CODE REVIEW, found {status.get('name')!r}")
+    elif " ".join(str(status.get("name") or "").split()).casefold() != expected.casefold():
         raise RuntimeError(f"Jira status {status!r}, expected {expected!r}; do not claim complete")
     print("POSTFLIGHT_OK " + json.dumps({"issue": key, "pr": pr.get("url"), "draft": True,
-                                         "review_head": sha, "jira": status}))
+                                         "review_head": sha, "jira": status.get("name")}))
 
 
 if __name__ == "__main__":

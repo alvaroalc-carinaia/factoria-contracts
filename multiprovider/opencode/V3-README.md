@@ -1,5 +1,8 @@
 # OpenCode Go — factoría v3 (DeepSeek V4.1 Flash + Kimi K3.1 Pro, con control de cuota)
 
+Para usar el tablero PB, configura `JIRA_PROJECT_KEY=PB` en el repo del producto. Tanto la selección por Rank como la comprobación de una key explícita exigen **Tareas por hacer**, sprint activo del tablero 6, `agent-ready` y únicamente `engine-opencode` como motor. El estado durante la implementación y la revisión automática es **En curso**. El postflight exige **CODE REVIEW** como entrega final. Los ejemplos con Listo y Human Review corresponden a KAN.
+
+
 **Fecha:** 28 de octubre de 2026. **Estado:** paquete revisado y probado LOCALMENTE (validación estática y pruebas unitarias); **NO probado con la cuenta Go, el Jira y GitHub reales del usuario**. Cada run toma **hasta 3 stories** en jobs separados (`max-parallel: 3`, `fail-fast: false`). Cron diario `0 23 * * *` (00:00 Europe/Madrid en invierno, CET; en verano, CEST, sería `0 22 * * *`). No sustituye Claude ni Cursor.
 
 ## Qué cambia respecto al paquete anterior

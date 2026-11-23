@@ -1,6 +1,6 @@
 # Roadmap de la factoría
 
-> **Estado de todas las iniciativas: Propuesto.** El diseño técnico lo decide Álvaro. Aquí solo se recogen objetivos, alcance inicial, piezas del repo afectadas, riesgos y preguntas abiertas. Nada de esto es una decisión cerrada.
+> El diseño técnico lo decide Álvaro. La tabla recoge el estado de cada iniciativa.
 
 ## Regla de priorización
 
@@ -8,7 +8,7 @@
 
 | # | Iniciativa | Impacto | Encaje | Esfuerzo | Prioridad | Estado |
 |---|---|---|---|---|---|---|
-| 1 | OpenAI como proveedor | por decidir | por decidir | por decidir | por decidir | Propuesto |
+| 1 | OpenAI como proveedor | por decidir | por decidir | por decidir | por decidir | Contratos preparados para piloto cloud |
 | 2 | Factoría multirrepo (Jira como fuente única) | por decidir | por decidir | por decidir | por decidir | Propuesto (dirección elegida) |
 | 3 | Propagación automática de contratos por PR | por decidir | por decidir | por decidir | por decidir | Propuesto |
 
@@ -18,28 +18,9 @@
 
 **Objetivo.** Tener un cuarto proveedor junto a Claude, Cursor y OpenCode, con las mismas reglas comunes y el mismo [contrato portable](multiprovider/contracts/PORTABLE-CONTRACT.md). Así hay más capacidad y menos dependencia de un solo vendor, y se pueden comparar coste y calidad por story.
 
-**Alcance inicial**
-- Una carpeta `multiprovider/<openai>/` con el contrato del orquestador y los agentes builder y reviewer, sin perder la regla de reviewer independiente y en solo lectura.
-- Una etiqueta de routing nueva y el valor correspondiente en `Factory Engine:`.
-- Instrucciones de instalación en el README, siguiendo el mismo formato que los demás providers.
+**Implementado en este repo.** Paquete para Codex Cloud, etiqueta `engine-openai`, marcador `Factory Engine: openai` y routing compartido. GPT-6.2 Astra orquesta hasta tres stories y revisa cada PR en un contexto independiente. GPT-6.2 Sol implementa y corrige en el mismo worktree. [Guía de instalación](multiprovider/openai/README.md)
 
-**Piezas del repo afectadas**
-- `multiprovider/jira/ROUTING.md`: lista de etiquetas `engine-*` y JQL por provider.
-- `multiprovider/contracts/PORTABLE-CONTRACT.md`: la lista de etiquetas válidas (`engine-claude`, `engine-cursor`, `engine-opencode`) y `Factory Engine: <claude|cursor|opencode>`.
-- `multiprovider/opencode/automation/opencode/jira_gate.py`: la regla de una sola etiqueta engine se basa en una lista fija de tres etiquetas. Habría que ampliarla para que una story con dos etiquetas engine siga saltándose. También sus tests en `multiprovider/opencode/tests/`.
-- Los contratos de Claude (`multiprovider/claude/…STRICT-ROUTING.md`) y Cursor (`multiprovider/cursor/01-scheduled-implement.md`), que también nombran las tres etiquetas.
-- `README.md`: tabla de providers e instalación.
-
-**Dependencias y riesgos**
-- Si un provider no reconoce la etiqueta nueva, podría tratar como válida una story que tenga dos etiquetas engine. Hay que actualizar los tres a la vez.
-- No sé si el runtime elegido permite subagentes aislados y un reviewer de verdad independiente. Si no lo permite, el contrato obliga a declararlo como hueco.
-- Habrá secretos y costes nuevos por run.
-
-**Preguntas abiertas para Álvaro**
-1. ¿Qué runtime usamos: Codex (CLI o cloud), la Agents API/SDK u OpenAI como modelo dentro de OpenCode? Si es lo último, ¿hablamos de un proveedor nuevo o de un modelo más de OpenCode?
-2. ¿Dónde se ejecuta: en GitHub Actions, como OpenCode, o en una plataforma gestionada?
-3. ¿Qué nombre llevan la etiqueta y el marcador (`engine-openai` / `Factory Engine: openai`)?
-4. ¿Cuántas stories por run y qué modelos usan el builder y el reviewer?
+**Pendiente de validación en un repo de producto.** Comprobar que una tarea diaria alojada usa el entorno publicado y los modelos seleccionados, y completar un piloto desde Jira hasta un Draft PR revisado en su HEAD actual.
 
 ---
 
@@ -81,7 +62,7 @@ El diseño técnico de cómo se hace sigue abierto.
 4. **Dependencias entre stories de repos distintos:** ¿basta con exigir el blocker en Finalizada, o hace falta algo más (orden de merge, versiones)?
 5. **Credenciales:** si hay un orquestador central, ¿con qué identidad escribe en cada repo (GitHub App, PAT o la integración de cada provider)?
 6. ¿Dónde vive la lista de repos permitidos: en este repo, en Jira o en otro sitio?
-7. ¿Aplica a los tres providers a la vez o empezamos por uno?
+7. ¿Aplica a todos los providers a la vez o empezamos por uno?
 
 ---
 

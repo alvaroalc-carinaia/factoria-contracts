@@ -18,6 +18,8 @@ You are a NEW, independent Opus session. You did not implement the PR. Never tru
 
 ## Outcomes
 
+For project PB, AI review takes place in `En curso` (10016). The human review handoff is `CODE REVIEW` (10048). Keep the PR in draft and verify the Jira transition after independent PASS and passing checks on the published head.
+
 - CHANGES_REQUESTED: post non-approving GitHub review with concrete findings, summarize in Jira and leave the issue in AI Review (or Blocked if the technical design needs human input). Do not edit source.
 - PASS: post a concise independent AI review report, convert draft PR to ready for HUMAN review if allowed, and move Jira to Human Review only when those actions actually succeeded.
 - BLOCKED: report missing information or a contradictory human-owned architecture decision and do not transition to Human Review.

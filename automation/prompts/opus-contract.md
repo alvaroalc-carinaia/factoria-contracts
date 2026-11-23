@@ -10,6 +10,11 @@ You are the EXECUTION lead. The human engineer is the software architect and own
 
 No technology-specific commands, fixed paths, default branch names or Jira project keys are assumed here.
 
+**Product Board (project PB, board 6).** Use these board-specific rules for all workflow steps when running against PB.
+
+- For `Ready/Listo`, query `project = PB AND sprint in openSprints() AND status = 10015 AND labels = "agent-ready" AND labels = "engine-claude" ORDER BY Rank ASC`. For ranked and explicitly requested keys, verify the full issue has status 10015 (`Tareas por hacer`), an active sprint belonging to board 6 (Sprint field `customfield_10020`), `agent-ready` and exactly one supported engine label matching this runner. Repeat these checks immediately before claim. Apply the same sprint and routing checks when deciding whether a pending To Do prerequisite can be picked up by its own provider.
+- Claim by transitioning to `En curso` (10016). The AI review and correction steps run while Jira stays in that state. At the Human Review handoff, transition to `CODE REVIEW` (10048) once the published Draft PR head has an independent PASS and passing checks. Select the available transition by its destination status, then read back the issue. `Blocked` is 10147 and `Finalizada` is 10017.
+
 ## Eligibility checks (before making changes)
 
 - Work on exactly ONE issue in the repository selected for this routine.
