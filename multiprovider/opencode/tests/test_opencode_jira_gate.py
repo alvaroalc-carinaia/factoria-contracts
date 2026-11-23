@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
@@ -65,8 +66,10 @@ class JiraGateTests(unittest.TestCase):
             mod.validate('KAN-9','inspect',lambda k:issue(k,status='En curso'),False)
 
     def test_labels_exclusive(self):
-        with self.assertRaisesRegex(mod.GateError,'exactly one'):
-            mod.validate('KAN-9','inspect',lambda k:issue(k,labels=['agent-ready','engine-claude','engine-opencode']),False)
+        for other in ('engine-claude', 'engine-cursor', 'engine-openai'):
+            for routes in ([other], ['engine-opencode', other]):
+                with self.subTest(routes=routes), self.assertRaisesRegex(mod.GateError, 'exactly one'):
+                    mod.validate('KAN-9', 'inspect', lambda k: issue(k, labels=['agent-ready', *routes]), False)
 
     def test_repo_mismatch(self):
         with self.assertRaisesRegex(mod.GateError,'Repository'):
@@ -143,7 +146,7 @@ class JiraGateTests(unittest.TestCase):
                 mod.validate('KAN-9','inspect',get,False)
 
 
-CLAUDE_RULE = ('**Localized status names:** Jira may return translated `status.name` values depending on the '
+CLAUDE_RULE = ('**Localized status names outside PB:** Jira may return translated `status.name` values depending on the '
                'account language. Treat `Ready` and `Listo` as the same status, and `Done` and `Finalizada` as the '
                'same status, in every check of this contract (candidate selection, dependency gate and re-checks). '
                'Any other name is not `Ready`/`Done`.')
@@ -158,6 +161,89 @@ def no_vars_env(**extra):
     env = {k: v for k, v in os.environ.items() if k not in NO_VARS}
     env.update({'GITHUB_REPOSITORY': 'owner/repo'}, **extra)
     return patch.dict(os.environ, env, clear=True)
+
+
+class ProductBoardTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(no_vars_env(JIRA_PROJECT_KEY='PB'))
+        self.candidate = issue('PB-1')
+        self.fields = self.candidate['fields']
+        self.fields['status'] = {'id': '10015', 'name': 'Tareas por hacer'}
+        self.active = {'boardId': 6, 'state': 'active'}
+        self.fields['customfield_10020'] = [{'boardId': 6, 'state': 'closed'}, self.active]
+        self.get = Mock(return_value=self.candidate)
+
+    def test_ranked_query_and_explicit_recheck(self):
+        search = Mock(return_value=['PB-1'])
+        chosen, skipped = mod.select('inspect', self.get, search, check_github=False)
+        self.assertEqual([row['issue'] for row in chosen], ['PB-1'])
+        self.assertEqual(skipped, [])
+        jql = search.call_args.args[0]
+        for clause in ('project = PB', 'sprint in openSprints()', 'status = 10015', 'labels = "agent-ready"',
+                       'labels = "engine-opencode"', 'ORDER BY Rank ASC'):
+            self.assertIn(clause, jql)
+        # The matrix job revalidates the key after selection. A closed sprint disqualifies it.
+        self.active['state'] = 'closed'
+        with self.assertRaisesRegex(mod.GateError, 'active sprint'):
+            mod.validate('PB-1', 'build', self.get, check_github=False)
+
+    def test_requires_an_active_sprint_from_this_board(self):
+        for sprints in (None, [], [{'state': 'future', 'boardId': 6}], [{'state': 'active', 'boardId': 7}]):
+            with self.subTest(sprints=sprints), self.assertRaisesRegex(mod.GateError, 'active sprint'):
+                self.fields['customfield_10020'] = sprints
+                mod.validate('PB-1', 'inspect', self.get, check_github=False)
+
+    def test_blocked_in_same_status_category_is_ineligible(self):
+        self.fields['status'] = {'id': '10147', 'name': 'Blocked', 'statusCategory': {'key': 'new'}}
+        with self.assertRaisesRegex(mod.GateError, 'Tareas por hacer'):
+            mod.validate('PB-1', 'build', self.get, check_github=False)
+
+    def test_pb_routing(self):
+        for labels in (['agent-ready'], ['engine-opencode'], ['agent-ready', 'engine-claude'],
+                       ['agent-ready', 'engine-opencode', 'engine-cursor']):
+            with self.subTest(labels=labels), self.assertRaisesRegex(mod.GateError, 'exactly one'):
+                self.fields['labels'] = labels
+                mod.validate('PB-1', 'build', self.get, check_github=False)
+
+    def test_pb_rest_detail_requests_sprint(self):
+        with no_vars_env(JIRA_PROJECT_KEY='PB', JIRA_URL='https://example.test',
+                         JIRA_USERNAME='user', JIRA_API_TOKEN='test'), patch.object(
+                mod.urllib.request, 'urlopen', return_value=io.BytesIO(b'{}')) as get:
+            mod.jira_client()('PB-1')
+            self.assertIn('customfield_10020', get.call_args.args[0].full_url)
+
+    def test_postflight_requires_code_review_after_verified_pr(self):
+        with patch.dict(sys.modules, {'jira_gate': mod}):
+            spec = importlib.util.spec_from_file_location('postflight', P.with_name('postflight.py'))
+            postflight = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(postflight)
+
+        sha = 'a' * 40
+        pr = {'number': 1, 'baseRefName': 'master', 'isDraft': True, 'headRefOid': sha,
+              'body': 'Factory Engine: opencode\nFactory Jira: PB-1'}
+        review = {'comments': [{'body': 'Factory Review: PASS\nFactory Review Head: ' + sha
+                                 + '\nFactory Reviewer: pr-reviewer'}]}
+        self.enterContext(patch.object(sys, 'argv', ['postflight.py', '--issue', 'PB-1']))
+        self.enterContext(patch.dict(os.environ, {'JIRA_URL': 'https://example.test',
+                                                  'JIRA_USERNAME': 'user', 'JIRA_API_TOKEN': 'test'}))
+        for status_id in ('10016', '10048'):
+            response = {'fields': {'status': {'id': status_id}}}
+            with self.subTest(status_id=status_id), patch.object(postflight, 'gh', side_effect=[[pr], review]), \
+                    patch.object(postflight.urllib.request, 'urlopen',
+                                 return_value=io.BytesIO(json.dumps(response).encode())):
+                if status_id == '10016':
+                    with self.assertRaisesRegex(RuntimeError, 'Expected PB CODE REVIEW'):
+                        postflight.main()
+                else:
+                    with patch('builtins.print') as output:
+                        postflight.main()
+                        self.assertIn('POSTFLIGHT_OK', output.call_args.args[0])
+
+    def test_blocker_workflow(self):
+        for status_id, stage in [('10015', 'ready'), ('10016', 'working'), ('10048', 'review'),
+                                 ('10017', 'done'), ('10147', None)]:
+            with self.subTest(status_id=status_id):
+                self.assertEqual(mod.blocker_stage({'status': {'id': status_id}}, 'PB'), stage)
 
 
 class ZeroConfigTests(unittest.TestCase):
@@ -192,7 +278,8 @@ class ZeroConfigTests(unittest.TestCase):
     def test_contracts_copy_claude_rule_verbatim(self):
         for rel in ('.opencode/agents/factory-orchestrator.md', 'automation/opencode/pilot-prompt.md'):
             self.assertIn(CLAUDE_RULE, (ROOT/rel).read_text(encoding='utf-8'), rel)
-            self.assertNotIn('En curso', (ROOT/rel).read_text(encoding='utf-8'), rel)
+            for term in ("10015", "board 6", "10016", "CODE REVIEW", "10048"):
+                self.assertIn(term, (ROOT/rel).read_text(encoding='utf-8'), rel)
 
     def test_repo_defaults_to_current_repo(self):
         with no_vars_env():
@@ -407,7 +494,7 @@ class DependencyWaitTests(unittest.TestCase):
     def test_published_parent_immediately_unlocks_child_across_engines(self):
         self.candidate('KAN-1', ['KAN-8', 'KAN-9'])
         self.data['KAN-9'] = issue('KAN-9', status='Finalizada', labels=[])
-        for engine in ('claude', 'cursor', 'opencode'):
+        for engine in ('claude', 'cursor', 'opencode', 'openai'):
             for status in ('In Progress', 'AI Review', 'Human Review'):
                 with self.subTest(engine=engine, status=status):
                     self.data['KAN-8'] = issue('KAN-8', status=status, labels=['agent-ready', 'engine-' + engine])
@@ -428,6 +515,29 @@ class DependencyWaitTests(unittest.TestCase):
         self.sleep.assert_called_once_with(600)
         self.assertEqual(chosen[0]['parents'][0]['issue'], 'KAN-8')
         self.assertEqual(mod.WAIT_SECONDS, 340 * 60)
+
+    def test_ready_openai_parent_requires_its_product_repo_and_available_branch(self):
+        self.candidate('KAN-1', ['KAN-8'])
+        labels = ['agent-ready', 'engine-openai']
+        for description in (PLAIN, 'Repository: repo\n' + PLAIN):
+            with self.subTest(description=description):
+                self.data['KAN-8'] = issue('KAN-8', labels=labels, description=description)
+                chosen, skipped, more = mod.select_wave('build', 1, [], 1900)
+                self.assertEqual(chosen, [])
+                self.assertFalse(more)
+                self.assertIn('owner/repo', skipped[0]['reason'])
+        self.data['KAN-8'] = issue('KAN-8', labels=labels)
+
+        def check_branch(key, branch):
+            if key == 'KAN-8' and branch == 'codex/KAN-8':
+                raise mod.GateError('remote OpenAI branch exists')
+
+        self.github.side_effect = check_branch
+        chosen, skipped, more = mod.select_wave('build', 1, [], 1900)
+        self.assertEqual(chosen, [])
+        self.assertFalse(more)
+        self.assertIn('remote OpenAI branch exists', skipped[0]['reason'])
+        self.sleep.assert_not_called()
 
     def test_independent_parents_require_a_single_head_containing_both(self):
         self.candidate('KAN-1', ['KAN-8', 'KAN-9'])

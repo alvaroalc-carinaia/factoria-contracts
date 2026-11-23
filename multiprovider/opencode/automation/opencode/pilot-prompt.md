@@ -11,7 +11,11 @@ Independently recheck Jira approved spec, agent-ready, engine-opencode, repo,
 Ready status, links and live statuses. A human prerequisite requires Done/Finalizada. For an unfinished agent prerequisite, verify the parent PR(s), branch and head in the runner's pinned plan.
 A story that declares no
 Repository/Repositorio targets __GITHUB_REPOSITORY__; one naming another repo is ineligible.
-**Localized status names:** Jira may return translated `status.name` values depending on the account language. Treat `Ready` and `Listo` as the same status, and `Done` and `Finalizada` as the same status, in every check of this contract (candidate selection, dependency gate and re-checks). Any other name is not `Ready`/`Done`.
+For PB, verify status 10015 (Tareas por hacer), an active sprint on board 6,
+agent-ready and only engine-opencode immediately before claim. Claim En curso
+(10016) and stay there during automated review and corrections. For every
+Human Review handoff below, use CODE REVIEW (10048) and verify the result.
+**Localized status names outside PB:** Jira may return translated `status.name` values depending on the account language. Treat `Ready` and `Listo` as the same status, and `Done` and `Finalizada` as the same status, in every check of this contract (candidate selection, dependency gate and re-checks). Any other name is not `Ready`/`Done`.
 Start from the runner's pinned base commit (fresh origin/master or a verified parent PR head). Confirm the current HEAD and recheck each parent before claim.
 
 Delegate source/test editing to feature-builder (DeepSeek V4.1 Flash) ONE TIME

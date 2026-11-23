@@ -9,7 +9,7 @@ name: OpenCode Factory - up to 3 issues
 #    max_issues eligible stories by Rank ASC (1-3, default 3).
 #  - automatic build   => start ready work immediately; poll only agent blockers
 #    for unused places. All selections share max_issues and one 340-minute window.
-#  - Ready = Listo and Done = Finalizada (same rule as the Claude/Cursor contracts).
+#  - PB uses Tareas por hacer in an active sprint of board 6. KAN uses Ready/Listo.
 #  - Repository defaults to this repo when the story does not declare one.
 #  - ENABLE_OPENCODE_FACTORY_PILOT is OPTIONAL: only the literal value 'false'
 #    acts as a kill switch for build; unset => runs normally.
@@ -64,8 +64,7 @@ env:
   # Optional custom-field overrides; empty => description parsing / defaults.
   JIRA_REPOSITORY_FIELD_ID: ${{ vars.JIRA_REPOSITORY_FIELD_ID }}
   JIRA_DEPENDENCIES_FIELD_ID: ${{ vars.JIRA_DEPENDENCIES_FIELD_ID }}
-  # Ready=Listo / Done=Finalizada are fixed in jira_gate.py (Claude contract
-  # rule, "any other name is not Ready/Done"); nothing to configure.
+  # PB uses its CODE REVIEW status ID. This override applies to other projects.
   JIRA_HUMAN_REVIEW_STATUS: ${{ vars.JIRA_HUMAN_REVIEW_STATUS || 'Human Review' }}
   JIRA_USERNAME: ${{ secrets.JIRA_USERNAME }}
   JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}

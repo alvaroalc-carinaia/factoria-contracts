@@ -58,13 +58,19 @@ def empty_dependency_value(value):
 #    Ready/Done."
 # Only case/whitespace normalization is permitted. No configuration needed:
 # JIRA_READY_STATUS / JIRA_DONE_STATUS are deliberately NOT honoured, so the
-# three providers behave identically.
+# providers behave identically.
 STATUS_EQUIVALENTS = {
     "ready": ("Ready", "Listo"),
     "done": ("Done", "Finalizada"),
 }
 DEFAULT_HUMAN_REVIEW_STATUS = "Human Review"
-ENGINES = {"engine-claude", "engine-cursor", "engine-opencode"}
+# Status and field IDs from Product Board (PB), board 6.
+PB_TODO = "10015"
+PB_IN_PROGRESS = "10016"
+PB_REVIEW = "10048"
+PB_DONE = "10017"
+PB_SPRINT_FIELD = "customfield_10020"
+ENGINES = {"engine-claude", "engine-cursor", "engine-opencode", "engine-openai"}
 WAIT_SECONDS = 340 * 60
 POLL_SECONDS = 10 * 60
 
@@ -227,6 +233,15 @@ def dependency_field_keys(value):
     return keys
 
 
+def require_pb_sprint(fields):
+    sprints = fields.get(PB_SPRINT_FIELD)
+    if not isinstance(sprints, list) or not any(
+        isinstance(sprint, dict) and sprint.get("state") == "active" and sprint.get("boardId") == 6
+        for sprint in sprints
+    ):
+        raise GateError("Issue requires an active sprint on PB board 6")
+
+
 def jira_client():
     base = os.environ["JIRA_URL"].rstrip("/")
     user = os.environ["JIRA_USERNAME"]
@@ -239,6 +254,8 @@ def jira_client():
         if not KEY.fullmatch(key):
             raise GateError("Invalid Jira key")
         selected = ["summary", "status", "labels", "description", "issuelinks"]
+        if project_key(key) == "PB":
+            selected.append(PB_SPRINT_FIELD)
         for config_name in ("JIRA_REPOSITORY_FIELD_ID", "JIRA_DEPENDENCIES_FIELD_ID"):
             if os.environ.get(config_name):
                 selected.append(os.environ[config_name])
@@ -335,13 +352,22 @@ def github_existing(issue_key, branch):
         raise GateError(f"Remote branch {branch} already exists; manual recovery required")
 
 
-def is_waitable_agent_blocker(fields, status):
-    labels = fields.get("labels")
-    human_review = os.getenv("JIRA_HUMAN_REVIEW_STATUS") or DEFAULT_HUMAN_REVIEW_STATUS
-    stages = {"listo", "ready", "in progress", "en curso", "ai review", human_review.strip().casefold()}
-    return (bool(status) and " ".join(status.split()).casefold() in stages
-            and isinstance(labels, list) and "agent-ready" in labels
-            and len(ENGINES.intersection(labels)) == 1)
+def blocker_stage(fields, project):
+    status = fields.get("status") or {}
+    if project == "PB":
+        return {PB_TODO: "ready", PB_IN_PROGRESS: "working", PB_REVIEW: "review",
+                PB_DONE: "done"}.get(status.get("id"))
+    name = " ".join(str(status.get("name") or "").split()).casefold()
+    if status_is(name, "done"):
+        return "done"
+    if status_is(name, "ready"):
+        return "ready"
+    review = os.getenv("JIRA_HUMAN_REVIEW_STATUS") or DEFAULT_HUMAN_REVIEW_STATUS
+    if name == review.strip().casefold() and name:
+        return "review"
+    if name in {"in progress", "en curso", "ai review"}:
+        return "working"
+    return None
 
 
 def github_api(endpoint, *flags):
@@ -404,7 +430,7 @@ def stack_base(repo, parents):
     raise GateError("Parent PRs have independent heads; no single branch contains all prerequisites")
 
 
-def repository_source(fields, description, repo):
+def repository_source(fields, description, repo, require_full_name=False):
     repo_field = os.environ.get("JIRA_REPOSITORY_FIELD_ID", "").strip()
     declared = []
     if repo_field:
@@ -413,6 +439,8 @@ def repository_source(fields, description, repo):
             declared = declared_repositories("Repository: " + field_value) or [field_value]
     if not declared:
         declared = declared_repositories(description)
+    if require_full_name and (not declared or any("/" not in value for value in declared)):
+        raise GateError(f"Story requires an explicit Repository owner/repo matching {repo!r}")
     # No Repository/Repositorio declaration at all => the repo running the
     # workflow (GITHUB_REPOSITORY). A declaration that names ANOTHER repo fails.
     repo_name = repo.split("/", 1)[1].lower()
@@ -433,6 +461,8 @@ def verify_ready_blocker(key, fields, engine, repo, get_prs, check_github):
             raise GateError(f"Ready blocker {key} already has an open PR")
         if engine == "opencode":
             github_existing(key, "agent/" + key.lower())
+        elif engine == "openai":
+            github_existing(key, "codex/" + key)
 
 
 def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wait, path):
@@ -453,26 +483,31 @@ def dependency_plan(fields, repo, get_issue, get_prs, check_github, evaluate_wai
     for dependency in sorted(blockers):
         dep_fields = get_issue(dependency).get("fields") or {}
         status = str((dep_fields.get("status") or {}).get("name") or "").strip()
-        if status_is(status, "done"):
+        stage = blocker_stage(dep_fields, project)
+        if stage == "done":
             continue
-        if not is_waitable_agent_blocker(dep_fields, status):
+        labels = dep_fields.get("labels")
+        if (not stage or not isinstance(labels, list) or "agent-ready" not in labels
+                or len(ENGINES.intersection(labels)) != 1):
             raise GateError(f"Blocker {dependency} is {status!r}, not exact Done/Finalizada or an active agent task")
-        repository_source(dep_fields, flatten_adf(dep_fields.get("description")), repo)
         engine = next(label for label in dep_fields["labels"] if label in ENGINES)
-        unfinished.append((dependency, dep_fields, status, engine.removeprefix("engine-")))
+        repository_source(dep_fields, flatten_adf(dep_fields.get("description")), repo,
+                          require_full_name=engine == "engine-openai")
+        if project == "PB" and stage == "ready":
+            require_pb_sprint(dep_fields)
+        unfinished.append((dependency, dep_fields, status, stage, engine.removeprefix("engine-")))
 
     parents = []
     pending = []
-    human_review = (os.getenv("JIRA_HUMAN_REVIEW_STATUS") or DEFAULT_HUMAN_REVIEW_STATUS).strip().casefold()
-    for dependency, dep_fields, status, engine in unfinished:
-        ready = status_is(status, "ready")
+    for dependency, dep_fields, status, stage, engine in unfinished:
+        ready = stage == "ready"
         if check_github and not ready:
             parent = parent_pr(get_prs(repo), repo, dependency, engine)
             if parent:
                 parents.append(parent)
                 continue
         reason = f"Blocker {dependency} is {status!r}, not exact Done/Finalizada; no verified parent PR"
-        if not evaluate_wait or status.casefold() == human_review:
+        if not evaluate_wait or stage == "review":
             raise GateError(reason)
         # Same rule as Claude/Cursor: a Listo blocker is traced by key. An
         # unpublished agent prerequisite (Listo, In Progress or AI Review)
@@ -504,8 +539,12 @@ def validate(key, mode, get_issue, check_github=True, evaluate_wait=False, get_p
     if not isinstance(fields, dict):
         raise GateError("Incomplete Jira issue response")
     actual_status = str((fields.get("status") or {}).get("name") or "").strip()
-    ready_set, ready_label = accepted_statuses("JIRA_READY_STATUS", "ready")
-    if not status_is(actual_status, "ready"):
+    if project == "PB":
+        if (fields.get("status") or {}).get("id") != PB_TODO:
+            raise GateError("Issue must be in Tareas por hacer on PB")
+        require_pb_sprint(fields)
+    elif not status_is(actual_status, "ready"):
+        _, ready_label = accepted_statuses("JIRA_READY_STATUS", "ready")
         raise GateError(f"Issue status {actual_status!r}; expected Ready status {ready_label!r} (no automatic status transitions)")
     labels = fields.get("labels")
     if not isinstance(labels, list):
@@ -541,6 +580,9 @@ def project_key(issue_key=""):
 
 
 def candidate_jql(project):
+    if project == "PB":
+        return (f'project = PB AND sprint in openSprints() AND status = {PB_TODO} '
+                'AND labels = "agent-ready" AND labels = "engine-opencode" ORDER BY Rank ASC')
     # Status is NOT put in the JQL (an unknown status name makes Jira reject the
     # whole query); Ready/Listo is checked per issue on the full detail.
     return (f'project = "{project}" AND labels = "agent-ready" AND labels = "engine-opencode" '
